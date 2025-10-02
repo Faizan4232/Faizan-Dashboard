@@ -8,7 +8,7 @@ Streamlit Stock Prediction Dashboard
 """
 import streamlit as st
 st.set_page_config(layout="wide", page_title="Stock Predictor — Streamlit", page_icon="📈")
-import sklearn
+#import sklearn
 import pandas as pd
 import numpy as np
 import yfinance as yf
