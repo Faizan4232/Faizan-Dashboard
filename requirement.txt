@@ -1,0 +1,16 @@
+streamlit
+pandas
+plotly
+wordcloud
+pillow
+pdfplumber
+python-docx
+openai
+echo "streamlit==1.38.0
+pandas==2.2.3
+plotly==5.24.1
+wordcloud==1.9.3
+pillow==10.4.0
+pdfplumber==0.11.0
+python-docx==1.1.2
+openai==1.52.0" > requirements.txt
