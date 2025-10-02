@@ -8,3 +8,9 @@ statsmodels==0.14.1
 matplotlib==3.8.0
 ta==0.12.0          # optional technical indicators library (used if available)
 joblib==1.3.2
+streamlit
+scikit-learn
+pandas
+numpy
+matplotlib
+yfinance
