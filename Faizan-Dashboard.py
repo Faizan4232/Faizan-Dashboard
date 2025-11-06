@@ -85,7 +85,7 @@ def calculate_indicators(df):
     """Calculate comprehensive technical indicators."""
     min_length = 20  # Minimum rows needed for most indicators
     if len(df) < min_length:
-        st.warning(f"Insufficient data ({len(df)} rows) for indicators. Using basic data only. Switch to a longer time frame or real data for full analysis.")
+        st.warning(f"Insufficient data ({len(df)} rows) for indicators. Using basic data only.")
         return df  # Return df without indicators to avoid errors
     
     # Existing: SMA, RSI, MACD
@@ -171,14 +171,11 @@ def main():
         if use_real_data:
             ticker = yf.Ticker(selected_stock)
             if time_frame == '1D':
-                df = ticker.history(period='5d', interval='1h')  # Fetch more data for 1D to ensure sufficiency
+                df = ticker.history(period='1d', interval='1h')
             elif time_frame == '1W':
-                df = ticker.history(period='1mo', interval='1d')  # Ensure at least a week's worth
+                df = ticker.history(period='5d', interval='1h')
             else:
                 df = ticker.history(period=time_frame.lower())
-            if df.empty or len(df) < 5:  # Fallback if still too short
-                st.warning("Real data fetch returned insufficient data. Using mock data as fallback.")
-                df = generate_mock_data(selected_stock, time_frame)
         else:
             df = generate_mock_data(selected_stock, time_frame)
         
@@ -186,7 +183,7 @@ def main():
         latest = df.iloc[-1]
         prev = df.iloc[-2] if len(df) > 1 else latest
 
-    # Key Metrics Row (expanded) - With column checks to prevent KeyError
+    # Key Metrics Row (expanded)
     col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
@@ -200,43 +197,28 @@ def main():
     
     with col2:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        if 'RSI' in df.columns and not pd.isna(latest['RSI']):
-            rsi = latest['RSI']
-            rsi_status = "Overbought" if rsi > 70 else "Oversold" if rsi < 30 else "Neutral"
-            color_class = "bearish" if rsi > 70 else "bullish" if rsi < 30 else "neutral"
-        else:
-            rsi = "N/A"
-            rsi_status = "Insufficient Data"
-            color_class = "neutral"
-        st.metric(label="RSI (14)", value=f"{rsi}", delta_color="normal")
+        rsi = latest['RSI']
+        rsi_status = "Overbought" if rsi > 70 else "Oversold" if rsi < 30 else "Neutral"
+        color_class = "bearish" if rsi > 70 else "bullish" if rsi < 30 else "neutral"
+        st.metric(label="RSI (14)", value=f"{rsi:.2f}", delta_color="normal")
         st.caption(f"Status: <span class='{color_class}'>{rsi_status}</span>", unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
     
     with col3:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        if 'ADX' in df.columns and not pd.isna(latest['ADX']):
-            adx = latest['ADX']
-            trend_strength = "Strong" if adx > 25 else "Weak"
-            color_class = "bullish" if adx > 25 else "neutral"
-        else:
-            adx = "N/A"
-            trend_strength = "Insufficient Data"
-            color_class = "neutral"
-        st.metric(label="ADX (14)", value=f"{adx}", delta_color="normal")
+        adx = latest['ADX']
+        trend_strength = "Strong" if adx > 25 else "Weak"
+        color_class = "bullish" if adx > 25 else "neutral"
+        st.metric(label="ADX (14)", value=f"{adx:.2f}", delta_color="normal")
         st.caption(f"Trend: <span class='{color_class}'>{trend_strength}</span>", unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
     
     with col4:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        if 'Stoch_K' in df.columns and not pd.isna(latest['Stoch_K']):
-            stoch_k = latest['Stoch_K']
-            stoch_status = "Overbought" if stoch_k > 80 else "Oversold" if stoch_k < 20 else "Neutral"
-            color_class = "bearish" if stoch_k > 80 else "bullish" if stoch_k < 20 else "neutral"
-        else:
-            stoch_k = "N/A"
-            stoch_status = "Insufficient Data"
-            color_class = "neutral"
-        st.metric(label="Stoch %K", value=f"{stoch_k}", delta_color="normal")
+        stoch_k = latest['Stoch_K']
+        stoch_status = "Overbought" if stoch_k > 80 else "Oversold" if stoch_k < 20 else "Neutral"
+        color_class = "bearish" if stoch_k > 80 else "bullish" if stoch_k < 20 else "neutral"
+        st.metric(label="Stoch %K", value=f"{stoch_k:.2f}", delta_color="normal")
         st.caption(f"Status: <span class='{color_class}'>{stoch_status}</span>", unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
     
@@ -248,7 +230,7 @@ def main():
             st.caption(f"Model R²: {r2:.2f}")
             st.markdown('</div>', unsafe_allow_html=True)
 
-    # Charts (expanded) - Handle missing indicators gracefully
+    # Charts (expanded)
     col1, col2 = st.columns(2)
     
     with col1:
@@ -259,14 +241,11 @@ def main():
             open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
             name="OHLC"
         ))
-        if 'SMA_20' in df.columns:
-            fig_price.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name="SMA 20", line=dict(color='orange')))
-        if 'BB_Upper' in df.columns:
-            fig_price.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], name="BB Upper", line=dict(color='green', dash='dash')))
-            fig_price.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], name="BB Lower", line=dict(color='red', dash='dash')))
-        if 'Ichimoku_A' in df.columns:
-            fig_price.add_trace(go.Scatter(x=df.index, y=df['Ichimoku_A'], name="Ichimoku A", line=dict(color='purple')))
-            fig_price.add_trace(go.Scatter(x=df.index, y=df['Ichimoku_B'], name="Ichimoku B", line=dict(color='blue')))
+        fig_price.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name="SMA 20", line=dict(color='orange')))
+        fig_price.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], name="BB Upper", line=dict(color='green', dash='dash')))
+        fig_price.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], name="BB Lower", line=dict(color='red', dash='dash')))
+        fig_price.add_trace(go.Scatter(x=df.index, y=df['Ichimoku_A'], name="Ichimoku A", line=dict(color='purple')))
+        fig_price.add_trace(go.Scatter(x=df.index, y=df['Ichimoku_B'], name="Ichimoku B", line=dict(color='blue')))
         fig_price.update_layout(
             title=f"{selected_stock} Price with Indicators",
             xaxis_title="Date", yaxis_title="Price ($)",
@@ -290,7 +269,7 @@ def main():
         else:
             st.write("Not enough data for prediction.")
 
-    # Technical Indicators Subplot (expanded) - Handle missing indicators
+    # Technical Indicators Subplot (expanded)
     st.subheader("Comprehensive Technical Indicators")
     fig_indicators = make_subplots(
         rows=4, cols=1,
@@ -301,30 +280,32 @@ def main():
     
     # Price
     fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Close'], name="Close", line=dict(color='blue')), row=1, col=1)
-    if 'SMA_20' in df.columns:
-        fig_indicators.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name="SMA 20", line=dict(color='orange')), row=1, col=1)
+    fig_indicators.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name="SMA 20", line=dict(color='orange')), row=1, col=1)
     
     # RSI & Williams
     fig_indicators.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
     fig_indicators.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
-    if 'RSI' in df.columns:
-        fig_indicators.add_trace(go.Scatter(x=df.index, y=df['RSI'], name="RSI", line=dict(color='purple')), row=2, col=1)
-    if 'Williams_R' in df.columns:
-        fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Williams_R'], name="Williams %R", line=dict(color='brown')), row=2, col=1)
+    fig_indicators.add_trace(go.Scatter(x=df.index, y=df['RSI'], name="RSI", line=dict(color='purple')), row=2, col=1)
+    fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Williams_R'], name="Williams %R", line=dict(color='brown')), row=2, col=1)
     
     # MACD & ADX
-    if 'MACD' in df.columns:
-        fig_indicators.add_trace(go.Scatter(x=df.index, y=df['MACD'], name="MACD", line=dict(color='blue')), row=3, col=1)
-        fig_indicators.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], name="Signal", line=dict(color='red')), row=3, col=1)
-    if 'ADX' in df.columns:
-        fig_indicators.add_trace(go.Scatter(x=df.index, y=df['ADX'], name="ADX", line=dict(color='green')), row=3, col=1)
+    fig_indicators.add_trace(go.Scatter(x=df.index, y=df['MACD'], name="MACD", line=dict(color='blue')), row=3, col=1)
+    fig_indicators.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], name="Signal", line=dict(color='red')), row=3, col=1)
+    fig_indicators.add_trace(go.Scatter(x=df.index, y=df['ADX'], name="ADX", line=dict(color='green')), row=3, col=1)
     
     # Stoch & Ichimoku
-    if 'Stoch_K' in df.columns:
-        fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Stoch_K'], name="Stoch %K", line=dict(color='orange')), row=4, col=1)
-        fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Stoch_D'], name="Stoch %D", line=dict(color='yellow')), row=4, col=1)
-    if 'Ichimoku_Conversion' in df.columns:
-        fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Ichimoku_Conversion'], name="Ichimoku Conversion", line=dict(color='purple')), row=4, col=1)
-        fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Ichimoku_Base'], name="Ichimoku Base", line=dict(color='blue')), row=4, col=1)
+    fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Stoch_K'], name="Stoch %K", line=dict(color='orange')), row=4, col=1)
+    fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Stoch_D'], name="Stoch %D", line=dict(color='yellow')), row=4, col=1)
+    fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Ichimoku_Conversion'], name="Ichimoku Conversion", line=dict(color='purple')), row=4, col=1)
+    fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Ichimoku_Base'], name="Ichimoku Base", line=dict(color='blue')), row=4, col=1)
     
     fig_indicators.update_layout(height=800, showlegend=True)
+    st.plotly_chart(fig_indicators, use_container_width=True)
+
+    # Data Table
+    st.subheader("Recent Market Data")
+    df_display = df[['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD', 'ADX', 'Stoch_K']].tail(10).round(2)
+    st.dataframe(df_display, use_container_width=True)
+
+if __name__ == "__main__":
+    main()
