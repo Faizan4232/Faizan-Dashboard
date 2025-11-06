@@ -11,9 +11,23 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from xgboost import XGBRegressor
 import shap
-from pyspark.sql import SparkSession
-from textblob import TextBlob
 import os
+
+# If you use PySpark or TextBlob, import inside functions to avoid startup errors if not installed
+
+def try_import_pyspark():
+    try:
+        from pyspark.sql import SparkSession
+        return SparkSession
+    except ImportError:
+        return None
+
+def try_import_textblob():
+    try:
+        from textblob import TextBlob
+        return TextBlob
+    except ImportError:
+        return None
 
 # Page config
 st.set_page_config(
@@ -43,40 +57,31 @@ def generate_mock_data(symbol, period):
     """Generate mock stock data for demonstration."""
     np.random.seed(42)
     if period == '1D':
-        intervals = 50  # Increased for indicator compatibility
+        intervals = 50
     elif period == '1W':
-        intervals = 50  # Increased for indicator compatibility
+        intervals = 50
     elif period == '1M':
         intervals = 30
     else:
         intervals = 90
-    
     dates = pd.date_range(end=datetime.now(), periods=intervals, freq='D' if intervals > 24 else 'H')
     dates = dates[-intervals:]
-    
     price = 150.0
-    prices = []
-    volumes = []
-    opens = []
-    highs = []
-    lows = []
-    
+    prices, volumes, opens, highs, lows = [], [], [], [], []
     for i in range(intervals):
         change = np.random.normal(0, 2)
         if i % 5 == 0:
-            change += np.random.choice([-3, 3], p=[0.5, 0.5])  # Fixed: probabilities sum to 1
+            change += np.random.choice([-3, 3], p=[0.5, 0.5])
         price += change
         open_price = price + np.random.normal(0, 1)
         high = max(open_price, price) + abs(np.random.normal(0, 1.5))
         low = min(open_price, price) - abs(np.random.normal(0, 1.5))
         volume = np.random.randint(5_000_000, 20_000_000)
-        
         opens.append(open_price)
         highs.append(high)
         lows.append(low)
         prices.append(price)
         volumes.append(volume)
-    
     df = pd.DataFrame({
         'Date': dates,
         'Open': opens,
@@ -90,34 +95,24 @@ def generate_mock_data(symbol, period):
 
 def calculate_indicators(df):
     """Calculate comprehensive technical indicators."""
-    min_length = 20  # Minimum rows needed for most indicators
+    min_length = 20
     if len(df) < min_length:
-        st.warning(f"Insufficient data ({len(df)} rows) for indicators. Using basic data only. Switch to a longer time frame or real data for full analysis.")
-        return df  # Return df without indicators to avoid errors
-    
-    # Existing: SMA, RSI, MACD
+        st.warning(f"Insufficient data ({len(df)} rows) for indicators. Using basic data only.")
+        return df
     df['SMA_20'] = ta.trend.sma_indicator(df['Close'], window=20)
     df['SMA_50'] = ta.trend.sma_indicator(df['Close'], window=50) if len(df) >= 50 else np.nan
     df['RSI'] = ta.momentum.rsi(df['Close'], window=14)
     macd = ta.trend.MACD(df['Close'])
     df['MACD'] = macd.macd()
     df['MACD_Signal'] = macd.macd_signal()
-    
-    # New: Bollinger Bands
     bollinger = ta.volatility.BollingerBands(df['Close'], window=20, window_dev=2)
     df['BB_Upper'] = bollinger.bollinger_hband()
     df['BB_Lower'] = bollinger.bollinger_lband()
     df['BB_Middle'] = bollinger.bollinger_mavg()
-    
-    # New: Stochastic Oscillator
     stoch = ta.momentum.StochasticOscillator(df['High'], df['Low'], df['Close'], window=14, smooth_window=3)
     df['Stoch_K'] = stoch.stoch()
     df['Stoch_D'] = stoch.stoch_signal()
-    
-    # New: Williams %R
     df['Williams_R'] = ta.momentum.williams_r(df['High'], df['Low'], df['Close'], lbp=14)
-    
-    # New: ADX (Average Directional Index) - Only if enough data
     if len(df) >= 14:
         adx = ta.trend.ADXIndicator(df['High'], df['Low'], df['Close'], window=14)
         df['ADX'] = adx.adx()
@@ -125,9 +120,7 @@ def calculate_indicators(df):
         df['ADX_Neg'] = adx.adx_neg()
     else:
         df['ADX'] = df['ADX_Pos'] = df['ADX_Neg'] = np.nan
-    
-    # New: Ichimoku Cloud (simplified) - Only if enough data
-    if len(df) >= 26:  # Ichimoku needs more data
+    if len(df) >= 26:
         ichimoku = ta.trend.IchimokuIndicator(df['High'], df['Low'])
         df['Ichimoku_A'] = ichimoku.ichimoku_a()
         df['Ichimoku_B'] = ichimoku.ichimoku_b()
@@ -135,34 +128,39 @@ def calculate_indicators(df):
         df['Ichimoku_Conversion'] = ichimoku.ichimoku_conversion_line()
     else:
         df['Ichimoku_A'] = df['Ichimoku_B'] = df['Ichimoku_Base'] = df['Ichimoku_Conversion'] = np.nan
-    
     return df
 
 def process_with_spark(df):
-    """Process data with PySpark for scalability."""
+    SparkSession = try_import_pyspark()
+    if SparkSession is None:
+        st.warning("PySpark is not installed. Big data processing is unavailable.")
+        return df
     spark = SparkSession.builder.appName("StockAnalysis").getOrCreate()
     spark_df = spark.createDataFrame(df.reset_index())
-    # Example: Add a simple feature (e.g., rolling mean)
     from pyspark.sql.window import Window
     from pyspark.sql.functions import avg
-    window_spec = Window.orderBy("Date").rowsBetween(-4, 0)  # Rolling 5-day mean
+    window_spec = Window.orderBy("Date").rowsBetween(-4, 0)
     spark_df = spark_df.withColumn("Rolling_Close", avg("Close").over(window_spec))
     return spark_df.toPandas().set_index('Date')
 
 def compute_sentiment(news_df):
-    """Compute sentiment from news headlines."""
+    TextBlob = try_import_textblob()
+    if TextBlob is None:
+        st.warning("TextBlob is not installed. Sentiment analysis is unavailable.")
+        news_df['sentiment'] = 0
+        return news_df.groupby('date')['sentiment'].mean().reset_index()
     sentiments = []
     for headline in news_df['headline']:
         polarity = TextBlob(headline).sentiment.polarity
         sentiments.append(polarity)
     news_df['sentiment'] = sentiments
-    return news_df.groupby('date')['sentiment'].mean().reset_index()  # Daily average
+    return news_df.groupby('date')['sentiment'].mean().reset_index()
 
 def predict_next_price(df, model_type='linear', days_ahead=1):
-    """Predict with multiple models."""
     df = df.dropna()
     if len(df) < 2:
-        return None, None, None, None
+        # Always return 6 outputs to match unpacking in main()
+        return None, None, None, None, None, None
     X = np.arange(len(df)).reshape(-1, 1)
     y = df['Close'].values
     if model_type == 'rf':
@@ -199,7 +197,7 @@ def main():
     use_spark = st.sidebar.checkbox("Use Spark for Big Data Processing", value=False)
     use_sentiment = st.sidebar.checkbox("Include Sentiment Analysis", value=False)
     model_choice = st.sidebar.selectbox("Prediction Model", options=['linear', 'rf', 'xgb'], index=0)
-    
+
     if st.sidebar.button("Refresh Data"):
         st.cache_data.clear()
         st.rerun()
@@ -225,11 +223,11 @@ def main():
                 df = generate_mock_data(selected_stock, time_frame)
         else:
             df = generate_mock_data(selected_stock, time_frame)
-        
+
         # Apply Spark processing if enabled
         if use_spark and len(df) > 100:
             df = process_with_spark(df)
-        
+
         # Apply sentiment if enabled
         if use_sentiment:
             if os.path.exists('data/news_data.parquet'):
@@ -238,14 +236,13 @@ def main():
                 df = df.merge(sentiment_df, left_index=True, right_on='date', how='left').fillna(0)
             else:
                 st.warning("News data not found. Skipping sentiment analysis.")
-        
+
         df = calculate_indicators(df)
         latest = df.iloc[-1]
         prev = df.iloc[-2] if len(df) > 1 else latest
 
-    # Key Metrics Row (expanded) - With column checks to prevent KeyError
+    # Key Metrics Row (expanded)
     col1, col2, col3, col4, col5 = st.columns(5)
-    
     with col1:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         st.metric(
@@ -254,7 +251,6 @@ def main():
             delta=f"${latest['Close'] - prev['Close']:.2f} ({((latest['Close'] - prev['Close']) / prev['Close'] * 100):+.2f}%)"
         )
         st.markdown('</div>', unsafe_allow_html=True)
-    
     with col2:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         if 'RSI' in df.columns and not pd.isna(latest['RSI']):
@@ -268,7 +264,6 @@ def main():
         st.metric(label="RSI (14)", value=f"{rsi}", delta_color="normal")
         st.caption(f"Status: <span class='{color_class}'>{rsi_status}</span>", unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
-    
     with col3:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         if 'ADX' in df.columns and not pd.isna(latest['ADX']):
@@ -282,7 +277,6 @@ def main():
         st.metric(label="ADX (14)", value=f"{adx}", delta_color="normal")
         st.caption(f"Trend: <span class='{color_class}'>{trend_strength}</span>", unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
-    
     with col4:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         if 'Stoch_K' in df.columns and not pd.isna(latest['Stoch_K']):
@@ -296,7 +290,6 @@ def main():
         st.metric(label="Stoch %K", value=f"{stoch_k}", delta_color="normal")
         st.caption(f"Status: <span class='{color_class}'>{stoch_status}</span>", unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
-    
     with col5:
         prediction, r2, rmse, mae, model, X = predict_next_price(df, model_choice)
         if prediction:
@@ -313,7 +306,7 @@ def main():
     comparison_data = []
     for mod in models:
         pred, r2_val, rmse_val, mae_val, _, _ = predict_next_price(df, mod)
-        if pred:
+        if pred is not None:
             comparison_data.append({'Model': mod.upper(), 'R²': r2_val, 'RMSE': rmse_val, 'MAE': mae_val})
     if comparison_data:
         comp_df = pd.DataFrame(comparison_data)
@@ -332,7 +325,6 @@ def main():
 
     # Charts (expanded) - Handle missing indicators gracefully
     col1, col2 = st.columns(2)
-    
     with col1:
         st.subheader(f"Price Chart with Indicators - {selected_stock}")
         fig_price = go.Figure()
@@ -355,7 +347,6 @@ def main():
             height=400
         )
         st.plotly_chart(fig_price, use_container_width=True)
-    
     with col2:
         st.subheader("Prediction Chart")
         if prediction:
@@ -364,7 +355,7 @@ def main():
             future_date = df.index[-1] + pd.Timedelta(days=1)
             fig_pred.add_trace(go.Scatter(x=[future_date], y=[prediction], name="Predicted", mode='markers', marker=dict(color='red', size=10)))
             fig_pred.update_layout(
-                title="Price Prediction (Linear Regression)",
+                title="Price Prediction",
                 xaxis_title="Date", yaxis_title="Price ($)",
                 height=400
             )
@@ -380,41 +371,33 @@ def main():
         vertical_spacing=0.1,
         row_heights=[0.3, 0.23, 0.23, 0.24]
     )
-    
-    # Price
     fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Close'], name="Close", line=dict(color='blue')), row=1, col=1)
     if 'SMA_20' in df.columns:
         fig_indicators.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name="SMA 20", line=dict(color='orange')), row=1, col=1)
-    
-    # RSI & Williams
     fig_indicators.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
     fig_indicators.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
     if 'RSI' in df.columns:
         fig_indicators.add_trace(go.Scatter(x=df.index, y=df['RSI'], name="RSI", line=dict(color='purple')), row=2, col=1)
     if 'Williams_R' in df.columns:
         fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Williams_R'], name="Williams %R", line=dict(color='brown')), row=2, col=1)
-    
-    # MACD & ADX
     if 'MACD' in df.columns:
         fig_indicators.add_trace(go.Scatter(x=df.index, y=df['MACD'], name="MACD", line=dict(color='blue')), row=3, col=1)
         fig_indicators.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], name="Signal", line=dict(color='red')), row=3, col=1)
     if 'ADX' in df.columns:
         fig_indicators.add_trace(go.Scatter(x=df.index, y=df['ADX'], name="ADX", line=dict(color='green')), row=3, col=1)
-    
-    # Stoch & Ichimoku
     if 'Stoch_K' in df.columns:
         fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Stoch_K'], name="Stoch %K", line=dict(color='orange')), row=4, col=1)
         fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Stoch_D'], name="Stoch %D", line=dict(color='yellow')), row=4, col=1)
     if 'Ichimoku_Conversion' in df.columns:
         fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Ichimoku_Conversion'], name="Ichimoku Conversion", line=dict(color='purple')), row=4, col=1)
         fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Ichimoku_Base'], name="Ichimoku Base", line=dict(color='blue')), row=4, col=1)
-    
     fig_indicators.update_layout(height=800, showlegend=True)
     st.plotly_chart(fig_indicators, use_container_width=True)
 
     # Data Table
     st.subheader("Recent Market Data")
-    df_display = df[['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD', 'ADX', 'Stoch_K']].tail(10).round(2)
+    cols_show = [c for c in ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD', 'ADX', 'Stoch_K'] if c in df.columns]
+    df_display = df[cols_show].tail(10).round(2)
     st.dataframe(df_display, use_container_width=True)
 
 if __name__ == "__main__":
