@@ -36,16 +36,12 @@ def generate_mock_data(symbol, period):
     """Generate mock stock data for demonstration."""
     np.random.seed(42)
     if period == '1D':
-        days = 1
-        intervals = 24
+        intervals = 50  # Increased for indicator compatibility
     elif period == '1W':
-        days = 7
-        intervals = 35
+        intervals = 50  # Increased for indicator compatibility
     elif period == '1M':
-        days = 30
         intervals = 30
     else:
-        days = 90
         intervals = 90
     
     dates = pd.date_range(end=datetime.now(), periods=intervals, freq='D' if intervals > 24 else 'H')
@@ -61,7 +57,7 @@ def generate_mock_data(symbol, period):
     for i in range(intervals):
         change = np.random.normal(0, 2)
         if i % 5 == 0:
-            change += np.random.choice([-3, 3], p=[0.3, 0.3])
+            change += np.random.choice([-3, 3], p=[0.5, 0.5])  # Fixed: probabilities sum to 1
         price += change
         open_price = price + np.random.normal(0, 1)
         high = max(open_price, price) + abs(np.random.normal(0, 1.5))
@@ -87,9 +83,14 @@ def generate_mock_data(symbol, period):
 
 def calculate_indicators(df):
     """Calculate comprehensive technical indicators."""
+    min_length = 20  # Minimum rows needed for most indicators
+    if len(df) < min_length:
+        st.warning(f"Insufficient data ({len(df)} rows) for indicators. Using basic data only.")
+        return df  # Return df without indicators to avoid errors
+    
     # Existing: SMA, RSI, MACD
     df['SMA_20'] = ta.trend.sma_indicator(df['Close'], window=20)
-    df['SMA_50'] = ta.trend.sma_indicator(df['Close'], window=50)
+    df['SMA_50'] = ta.trend.sma_indicator(df['Close'], window=50) if len(df) >= 50 else np.nan
     df['RSI'] = ta.momentum.rsi(df['Close'], window=14)
     macd = ta.trend.MACD(df['Close'])
     df['MACD'] = macd.macd()
@@ -109,26 +110,32 @@ def calculate_indicators(df):
     # New: Williams %R
     df['Williams_R'] = ta.momentum.williams_r(df['High'], df['Low'], df['Close'], lbp=14)
     
-    # New: ADX (Average Directional Index)
-    adx = ta.trend.ADXIndicator(df['High'], df['Low'], df['Close'], window=14)
-    df['ADX'] = adx.adx()
-    df['ADX_Pos'] = adx.adx_pos()
-    df['ADX_Neg'] = adx.adx_neg()
+    # New: ADX (Average Directional Index) - Only if enough data
+    if len(df) >= 14:
+        adx = ta.trend.ADXIndicator(df['High'], df['Low'], df['Close'], window=14)
+        df['ADX'] = adx.adx()
+        df['ADX_Pos'] = adx.adx_pos()
+        df['ADX_Neg'] = adx.adx_neg()
+    else:
+        df['ADX'] = df['ADX_Pos'] = df['ADX_Neg'] = np.nan
     
-    # New: Ichimoku Cloud (simplified)
-    ichimoku = ta.trend.IchimokuIndicator(df['High'], df['Low'])
-    df['Ichimoku_A'] = ichimoku.ichimoku_a()
-    df['Ichimoku_B'] = ichimoku.ichimoku_b()
-    df['Ichimoku_Base'] = ichimoku.ichimoku_base_line()
-    df['Ichimoku_Conversion'] = ichimoku.ichimoku_conversion_line()
+    # New: Ichimoku Cloud (simplified) - Only if enough data
+    if len(df) >= 26:  # Ichimoku needs more data
+        ichimoku = ta.trend.IchimokuIndicator(df['High'], df['Low'])
+        df['Ichimoku_A'] = ichimoku.ichimoku_a()
+        df['Ichimoku_B'] = ichimoku.ichimoku_b()
+        df['Ichimoku_Base'] = ichimoku.ichimoku_base_line()
+        df['Ichimoku_Conversion'] = ichimoku.ichimoku_conversion_line()
+    else:
+        df['Ichimoku_A'] = df['Ichimoku_B'] = df['Ichimoku_Base'] = df['Ichimoku_Conversion'] = np.nan
     
     return df
 
 def predict_next_price(df, days_ahead=1):
     """Simple linear regression prediction for next price."""
-    if len(df) < 10:
+    df = df.dropna()  # Drop NaNs first
+    if len(df) < 2:  # Need at least 2 points for regression
         return None, None
-    df = df.dropna()
     X = np.arange(len(df)).reshape(-1, 1)
     y = df['Close'].values
     model = LinearRegression()
