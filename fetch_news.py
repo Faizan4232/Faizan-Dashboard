@@ -1,10 +1,26 @@
+"""
+fetch.py - Fetch and save news headlines for S&P 500 companies.
+Usage:
+    python fetch.py --apikey YOUR_API_KEY --output data/news_headlines.parquet --max_articles 10
+Requires: pandas, requests, newsapi-python, tqdm
+"""
+
 import pandas as pd
 import os
 import requests
-from newsapi import NewsApiClient
+import argparse
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
+try:
+    from newsapi import NewsApiClient
+except ImportError:
+    raise ImportError("Please install 'newsapi-python' via 'pip install newsapi-python'")
 
-# --- CONFIGURATION ---
-API_KEY = 'f260d5675ae449d5a1e6a30ea49a6410' 
+# --- Default Config ---
+DEFAULT_API_KEY = 'f260d5675ae449d5a1e6a30ea49a6410' # Change to your real key or use --apikey argument
+
 
 def get_sp500_companies():
     """Scrapes S&P 500 company names and tickers from Wikipedia."""
@@ -21,12 +37,14 @@ def get_sp500_companies():
     print(f"Loaded {len(companies)} company names and tickers.")
     return companies
 
-def fetch_all_news(companies):
-    """Fetches news articles for a list of companies."""
-    newsapi = NewsApiClient(api_key=API_KEY)
+
+def fetch_all_news(companies, apikey, max_articles=10):
+    """Fetches news articles for a list of companies using NewsAPI."""
+    newsapi = NewsApiClient(api_key=apikey)
     all_articles = []
-    print("\nFetching news articles... This may take a while.")
-    for company in companies:
+    print(f"\nFetching news articles for up to {max_articles} per company...")
+    iterator = tqdm(companies, desc='Companies') if tqdm else companies
+    for company in iterator:
         ticker = company['Symbol']
         company_name = company['Security']
         try:
@@ -34,32 +52,48 @@ def fetch_all_news(companies):
                 q=f'"{company_name}"',
                 language='en',
                 sort_by='publishedAt',
-                page_size=10 # Limit to 10 recent articles per company for API efficiency
+                page_size=max_articles  # Up to 100 per API, we use small number for quota
             )
             for article in articles['articles']:
                 all_articles.append({
                     'ticker': ticker,
-                    'published_at': article['publishedAt'],
-                    'title': article['title']
+                    'published_at': article.get('publishedAt'),
+                    'title': article.get('title')
                 })
         except Exception as e:
-            print(f"Could not fetch news for {company_name}. Error: {e}")
-    return pd.DataFrame(all_articles)
+            print(f"Could not fetch news for {company_name} ({ticker}): {e}")
+    news_df = pd.DataFrame(all_articles)
+    return news_df
+
 
 def save_news_data(df, path='data/news_headlines.parquet'):
     """Saves the news DataFrame to a Parquet file."""
-    if df.empty:
+    if df is None or df.empty:
         print("\nNo news articles fetched. Nothing to save.")
-        return
+        return None
     df['published_at'] = pd.to_datetime(df['published_at'])
-    if not os.path.exists('data'):
-        os.makedirs('data')
+    outdir = os.path.dirname(path)
+    if outdir and not os.path.exists(outdir):
+        os.makedirs(outdir)
     df.to_parquet(path)
     print(f"\nSuccessfully fetched {len(df)} articles.")
     print(f"News data saved to {path}")
+    return path
 
-if __name__ == "__main__":
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--apikey', default=DEFAULT_API_KEY, help='NewsAPI key. Required.')
+    parser.add_argument('--output', default='data/news_headlines.parquet', help='Output path for news parquet.')
+    parser.add_argument('--max_articles', type=int, default=10, help='Max articles per company [1-100].')
+    args = parser.parse_args()
+    if not args.apikey or args.apikey == 'f260d5675ae449d5a1e6a30ea49a6410':
+        print("f260d5675ae449d5a1e6a30ea49a6410")
+        return
     company_list = get_sp500_companies()
     if company_list:
-        news_data = fetch_all_news(company_list)
-        save_news_data(news_data)
+        news_data = fetch_all_news(company_list, apikey=args.apikey, max_articles=args.max_articles)
+        save_news_data(news_data, path=args.output)
+
+if __name__ == "__main__":
+    main()
