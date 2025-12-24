@@ -1,123 +1,112 @@
+# feature_engineering.py
 """
-feature_engineering.py
-----------------------
-Spark-based feature engineering and feature selection for
-stock market trend prediction.
+Feature engineering:
+- Load merged master dataset
+- Compute technical indicators
+- Create trend label (up/down)
+- Select best indicators
+- Save features and feature importance
 
-Input  : data/master_dataset.parquet
-Output :
-    - data/features_dataset.parquet
-    - data/feature_importance.csv
+Input:
+    data/master_dataset.parquet
 
-Implements:
-- Technical indicators
-- Trend labeling
-- Feature selection (SelectKBest)
+Outputs:
+    data/features_selected.parquet
+    data/feature_importance.csv
 """
 
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, lag, when
-from pyspark.sql.window import Window
+import os
 import pandas as pd
-import numpy as np
-
+import ta
 from sklearn.feature_selection import SelectKBest, f_classif
 
-# -----------------------------
-# Spark Session
-# -----------------------------
-spark = SparkSession.builder \
-    .appName("FeatureEngineeringStockPrediction") \
-    .getOrCreate()
+INPUT_PATH = "data/master_dataset.parquet"
+OUTPUT_FEATURES = "data/features_selected.parquet"
+OUTPUT_IMPORTANCE = "data/feature_importance.csv"
 
-# -----------------------------
-# Load merged dataset
-# -----------------------------
-df = spark.read.parquet("data/master_dataset.parquet")
+if not os.path.exists(INPUT_PATH):
+    raise FileNotFoundError(f"{INPUT_PATH} not found. Run merge_data.py first.")
 
-# Ensure required columns
-required_cols = ["date", "ticker", "close"]
-for c in required_cols:
-    if c not in df.columns:
-        raise ValueError(f"Missing column: {c}")
+print("📥 Loading master dataset with pandas...")
+df = pd.read_parquet(INPUT_PATH)
+print("Available columns:", list(df.columns))
 
-# -----------------------------
-# Window specification
-# -----------------------------
-w = Window.partitionBy("ticker").orderBy("date")
+# Standardize column names
+cols = {c.lower(): c for c in df.columns}
+date_col = cols.get("date") or cols.get("timestamp") or cols.get("datetime")
+ticker_col = cols.get("ticker")
+close_col = cols.get("close") or cols.get("adjclose") or cols.get("adj_close")
 
-# -----------------------------
-# Technical Indicators
-# -----------------------------
-# Simple Moving Average
-df = df.withColumn("SMA_5", lag("close", 5).over(w))
-df = df.withColumn("SMA_10", lag("close", 10).over(w))
+if date_col is None or ticker_col is None or close_col is None:
+    raise ValueError(
+        "Master dataset must contain date/ticker/close information. "
+        f"Found columns: {list(df.columns)}"
+    )
 
-# Exponential Moving Average (approx)
-df = df.withColumn("EMA_5", lag("close", 5).over(w))
-df = df.withColumn("EMA_10", lag("close", 10).over(w))
-
-# Momentum
-df = df.withColumn("Momentum", col("close") - lag("close", 1).over(w))
-
-# Volatility (rolling std approximation)
-df = df.withColumn("Volatility", col("close") - lag("close", 5).over(w))
-
-# -----------------------------
-# Trend Label (TARGET)
-# -----------------------------
-df = df.withColumn(
-    "Trend",
-    when(lag("close", -1).over(w) > col("close"), 1).otherwise(0)
+df = df.rename(
+    columns={
+        date_col: "date",
+        ticker_col: "ticker",
+        close_col: "close",
+    }
 )
 
-# -----------------------------
-# Select features for ML
-# -----------------------------
-feature_cols = [
-    "SMA_5", "SMA_10",
-    "EMA_5", "EMA_10",
-    "Momentum", "Volatility"
-]
+if "daily_sentiment" in df.columns and "sentiment" not in df.columns:
+    df = df.rename(columns={"daily_sentiment": "sentiment"})
 
-# Optional sentiment (if present)
-if "daily_sentiment" in df.columns:
-    feature_cols.append("daily_sentiment")
+df = df.sort_values(["ticker", "date"]).reset_index(drop=True)
+df["date"] = pd.to_datetime(df["date"])
 
-# Drop null rows
-df_ml = df.select(["date", "ticker", "Trend"] + feature_cols).dropna()
+print("🔧 Computing technical indicators...")
 
-# Convert to Pandas for feature selection
-pdf = df_ml.toPandas()
+def add_indicators(group):
+    c = group["close"]
+    group["rsi"] = ta.momentum.RSIIndicator(c).rsi()
+    group["ema"] = ta.trend.EMAIndicator(c).ema_indicator()
+    macd_obj = ta.trend.MACD(c)
+    group["macd"] = macd_obj.macd()
+    bb_obj = ta.volatility.BollingerBands(c)
+    group["bb"] = bb_obj.bollinger_mavg()
+    return group
 
-X = pdf[feature_cols].values
-y = pdf["Trend"].values
+df = df.groupby("ticker", group_keys=False).apply(add_indicators)
 
-# -----------------------------
-# Feature Selection
-# -----------------------------
-selector = SelectKBest(score_func=f_classif, k=min(6, X.shape[1]))
+print("📈 Creating trend label...")
+df["next_close"] = df.groupby("ticker")["close"].shift(-1)
+df["trend"] = (df["next_close"] > df["close"]).astype(int)
+
+if "sentiment" in df.columns:
+    df["sentiment"] = df["sentiment"].fillna(0.0)
+else:
+    df["sentiment"] = 0.0
+
+df = df.dropna(subset=["rsi", "ema", "macd", "bb", "trend"])
+
+print("🧠 Selecting best indicators...")
+features = ["rsi", "ema", "macd", "bb"]
+X = df[features]
+y = df["trend"]
+
+selector = SelectKBest(score_func=f_classif, k=3)
 X_selected = selector.fit_transform(X, y)
+selected_features = X.columns[selector.get_support()].tolist()
 
-selected_features = [
-    feature_cols[i] for i in selector.get_support(indices=True)
-]
+importance_df = pd.DataFrame(
+    {
+        "feature": features,
+        "score": selector.scores_,
+        "selected": selector.get_support(),
+    }
+).sort_values("score", ascending=False)
 
-# Save feature importance
-feature_scores = pd.DataFrame({
-    "Feature": feature_cols,
-    "Score": selector.scores_
-}).sort_values(by="Score", ascending=False)
+os.makedirs(os.path.dirname(OUTPUT_IMPORTANCE), exist_ok=True)
+importance_df.to_csv(OUTPUT_IMPORTANCE, index=False)
 
-feature_scores.to_csv("data/feature_importance.csv", index=False)
+print("💾 Saving selected features dataset...")
+final_df = df[selected_features + ["sentiment", "trend"]].copy()
+final_df.to_parquet(OUTPUT_FEATURES, index=False)
 
-# -----------------------------
-# Save final dataset
-# -----------------------------
-final_df = pdf[["date", "ticker", "Trend"] + selected_features]
-final_df.to_parquet("data/features_dataset.parquet", index=False)
-
-print("Feature engineering completed.")
+print("✅ Feature engineering completed")
 print("Selected features:", selected_features)
-
-spark.stop()
+print(f"📁 Features saved to: {OUTPUT_FEATURES}")
+print(f"📁 Importance saved to: {OUTPUT_IMPORTANCE}")

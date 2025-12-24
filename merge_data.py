@@ -1,130 +1,118 @@
+# merge_data.py
 """
-merge_data.py - Merge S&P 500 OHLCV prices and daily news sentiment with PySpark.
+Merge historical stock prices with daily news sentiment (Spark for join, pandas for save).
 
-Usage:
-    python merge_data.py --prices data/historical_ohlcv.parquet \
-        --news data/news_sentiment.parquet \
-        --output data/master_dataset.parquet
+Inputs:
+  data/historical_prices_fixed.parquet  (date, open, high, low, close, volume, ticker)
+  data/news_sentiment.parquet           (ticker, date, sentiment)
 
-Requires:
-    pyspark
+Output:
+  data/master_dataset.parquet
 """
 
-# Spark-based distributed merge for large-scale financial and news/sentiment data
-
-import argparse
 import os
-
+import argparse
+import pandas as pd
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, to_date, expr
+from pyspark.sql.functions import col, to_date
 
 
-def create_spark_session():
-    return (
+def main(prices_path, news_path, output_path):
+    spark = (
         SparkSession.builder
-        .appName("Merge Stock OHLCV and Sentiment")
+        .appName("MergeStockAndSentiment")
         .getOrCreate()
     )
 
+    try:
+        print("📥 Loading price data from:", prices_path)
+        prices_df = spark.read.parquet(prices_path)
+        print("Price schema:")
+        prices_df.printSchema()
+        print("Price count:", prices_df.count())
 
-def file_exists(path):
-    return os.path.exists(path)
+        # Ensure date is proper date
+        if "date" in prices_df.columns:
+            prices_df = prices_df.withColumn(
+                "date", to_date(col("date").cast("string"))
+            )
+        elif "Date" in prices_df.columns:
+            prices_df = prices_df.withColumn(
+                "date", to_date(col("Date").cast("string"))
+            )
+        else:
+            raise ValueError("Price data must contain 'date' or 'Date' column")
+
+        prices_df = prices_df.select(
+            col("ticker"),
+            col("date"),
+            col("open"),
+            col("high"),
+            col("low"),
+            col("close"),
+            col("volume"),
+        )
+
+        print("📥 Loading news sentiment data from:", news_path)
+        news_df = spark.read.parquet(news_path)
+        print("News schema:")
+        news_df.printSchema()
+        print("News count:", news_df.count())
+
+        news_df = news_df.withColumn(
+            "date", to_date(col("date").cast("string"))
+        )
+
+        news_df = news_df.select(
+            col("ticker"),
+            col("date"),
+            col("sentiment").alias("daily_sentiment"),
+        )
+
+        print("🔗 Merging datasets (left join on ticker,date)...")
+        merged_df = prices_df.join(
+            news_df,
+            on=["ticker", "date"],
+            how="left",
+        )
+
+        print("Merged count:", merged_df.count())
+        merged_df = merged_df.fillna({"daily_sentiment": 0.0})
+
+        # Convert to pandas and save to avoid Hadoop Windows native IO issues
+        print("💾 Converting merged Spark DataFrame to pandas...")
+        merged_pd = merged_df.toPandas()
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        merged_pd.to_parquet(output_path, index=False)
+
+        print(f"✅ Master dataset saved to {output_path} via pandas")
+        print("Merged pandas shape:", merged_pd.shape)
+
+    except Exception as e:
+        print(f"❌ Error during merge: {e}")
+
+    finally:
+        spark.stop()
+        print("🛑 Spark session stopped")
 
 
-def main():
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--prices",
-        default="data/historical_ohlcv.parquet",
-        help="Input OHLCV Parquet file (MultiIndex columns flattened by Spark).",
+        default="data/historical_prices_fixed.parquet",
+        help="Path to Spark-safe historical OHLCV parquet file",
     )
     parser.add_argument(
         "--news",
         default="data/news_sentiment.parquet",
-        help="Input daily sentiment Parquet (columns: ticker, date, sentiment).",
+        help="Path to daily news sentiment parquet file",
     )
     parser.add_argument(
         "--output",
         default="data/master_dataset.parquet",
-        help="Output merged Parquet file.",
+        help="Output merged parquet path",
     )
-
     args = parser.parse_args()
-
-    if not file_exists(args.prices):
-        print(f"Prices file not found: {args.prices}")
-        return
-
-    if not file_exists(args.news):
-        print(f"News sentiment file not found: {args.news}")
-        return
-
-    spark = create_spark_session()
-
-    try:
-        print("Loading price data...")
-        prices_df = spark.read.parquet(args.prices)
-
-        print("Loading sentiment data...")
-        news_df = spark.read.parquet(args.news)
-
-        # Expect: news_df has columns: ticker, date, sentiment
-        if not (
-            "ticker" in news_df.columns
-            and "date" in news_df.columns
-            and "sentiment" in news_df.columns
-        ):
-            print("News parquet missing required columns: ticker, date, sentiment")
-            return
-
-        # If OHLCV MultiIndex was flattened, you may have columns like:
-        # ('AAPL','Close') -> 'AAPL_Close'. For simplicity here, assume a wide Close matrix
-        # If your prices_df is wide with 'Date' + tickers as Close,
-        # unpivot (stack) to long format: (date, ticker, close)
-        print(f"Price columns: {prices_df.columns}")
-
-        if "Date" not in prices_df.columns:
-            print("Expected 'Date' column in prices parquet.")
-            return
-
-        price_cols = [c for c in prices_df.columns if c != "Date"]
-        if not price_cols:
-            print("No ticker columns found in prices parquet.")
-            return
-
-        stack_expr = ", ".join([f"'{ticker}', `{ticker}`" for ticker in price_cols])
-
-        prices_long_df = prices_df.select(
-            col("Date").alias("date"),
-            expr(f"stack({len(price_cols)}, {stack_expr}) as (ticker, close)"),
-        )
-
-        print(f"Prices long format count: {prices_long_df.count()}")
-
-        # Join prices with sentiment on (date, ticker)
-        master_df = prices_long_df.join(
-            news_df,
-            on=["date", "ticker"],
-            how="left",
-        )
-
-        print(f"Merged dataset count: {master_df.count()}")
-
-        # Save merged output
-        outdir = os.path.dirname(args.output) or "."
-        if not os.path.exists(outdir):
-            os.makedirs(outdir)
-
-        master_df.write.mode("overwrite").parquet(args.output)
-        print(f"Merged dataset saved to {args.output}.")
-
-    except Exception as e:
-        print(f"Error during merge: {e}")
-
-    finally:
-        spark.stop()
-        print("SparkSession stopped.")
-
-
-if __name__ == "__main__":
-    main()
+    main(args.prices, args.news, args.output)
