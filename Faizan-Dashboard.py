@@ -6,399 +6,458 @@ from plotly.subplots import make_subplots
 import yfinance as yf
 from datetime import datetime, timedelta
 import ta
-from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_squared_error, mean_absolute_error
-from xgboost import XGBRegressor
-import shap
 import os
 
-# If you use PySpark or TextBlob, import inside functions to avoid startup errors if not installed
-
-def try_import_pyspark():
-    try:
-        from pyspark.sql import SparkSession
-        return SparkSession
-    except ImportError:
-        return None
-
-def try_import_textblob():
-    try:
-        from textblob import TextBlob
-        return TextBlob
-    except ImportError:
-        return None
-
+# --------------------------------------------------
 # Page config
+# --------------------------------------------------
 st.set_page_config(
-    page_title="Stock Market Trend Analysis & Prediction",
+    page_title="Stock Market Trend Analysis & Sentiment Dashboard",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# Custom CSS for better styling
-st.markdown("""
-<style>
-    .metric-card {
-        background-color: #f0f2f6;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        border-left: 4px solid #1f77b4;
-    }
-    .bullish { color: #28a745; }
-    .bearish { color: #dc3545; }
-    .neutral { color: #6c757d; }
-</style>
-""", unsafe_allow_html=True)
+# --------------------------------------------------
+# Helper functions
+# --------------------------------------------------
 
 @st.cache_data
 def generate_mock_data(symbol, period):
-    """Generate mock stock data for demonstration."""
+    """Generate mock OHLCV stock data for demonstration."""
     np.random.seed(42)
-    if period == '1D':
+
+    if period == "1D":
         intervals = 50
-    elif period == '1W':
+    elif period == "1W":
         intervals = 50
-    elif period == '1M':
+    elif period == "1M":
         intervals = 30
     else:
         intervals = 90
-    dates = pd.date_range(end=datetime.now(), periods=intervals, freq='D' if intervals > 24 else 'H')
+
+    dates = pd.date_range(
+        end=datetime.now(),
+        periods=intervals,
+        freq="D" if intervals > 24 else "H",
+    )
     dates = dates[-intervals:]
+
     price = 150.0
     prices, volumes, opens, highs, lows = [], [], [], [], []
+
     for i in range(intervals):
         change = np.random.normal(0, 2)
         if i % 5 == 0:
             change += np.random.choice([-3, 3], p=[0.5, 0.5])
         price += change
+
         open_price = price + np.random.normal(0, 1)
         high = max(open_price, price) + abs(np.random.normal(0, 1.5))
         low = min(open_price, price) - abs(np.random.normal(0, 1.5))
         volume = np.random.randint(5_000_000, 20_000_000)
+
         opens.append(open_price)
         highs.append(high)
         lows.append(low)
         prices.append(price)
         volumes.append(volume)
-    df = pd.DataFrame({
-        'Date': dates,
-        'Open': opens,
-        'High': highs,
-        'Low': lows,
-        'Close': prices,
-        'Volume': volumes
-    })
-    df.set_index('Date', inplace=True)
+
+    df = pd.DataFrame(
+        {
+            "Date": dates,
+            "Open": opens,
+            "High": highs,
+            "Low": lows,
+            "Close": prices,
+            "Volume": volumes,
+        }
+    )
+    df.set_index("Date", inplace=True)
     return df
+
 
 def calculate_indicators(df):
-    """Calculate comprehensive technical indicators."""
+    """Calculate a set of technical indicators for visualization."""
     min_length = 20
     if len(df) < min_length:
-        st.warning(f"Insufficient data ({len(df)} rows) for indicators. Using basic data only.")
+        st.warning(
+            f"Insufficient data ({len(df)} rows) for full indicators. "
+            "Showing basic price data only."
+        )
         return df
-    df['SMA_20'] = ta.trend.sma_indicator(df['Close'], window=20)
-    df['SMA_50'] = ta.trend.sma_indicator(df['Close'], window=50) if len(df) >= 50 else np.nan
-    df['RSI'] = ta.momentum.rsi(df['Close'], window=14)
-    macd = ta.trend.MACD(df['Close'])
-    df['MACD'] = macd.macd()
-    df['MACD_Signal'] = macd.macd_signal()
-    bollinger = ta.volatility.BollingerBands(df['Close'], window=20, window_dev=2)
-    df['BB_Upper'] = bollinger.bollinger_hband()
-    df['BB_Lower'] = bollinger.bollinger_lband()
-    df['BB_Middle'] = bollinger.bollinger_mavg()
-    stoch = ta.momentum.StochasticOscillator(df['High'], df['Low'], df['Close'], window=14, smooth_window=3)
-    df['Stoch_K'] = stoch.stoch()
-    df['Stoch_D'] = stoch.stoch_signal()
-    df['Williams_R'] = ta.momentum.williams_r(df['High'], df['Low'], df['Close'], lbp=14)
+
+    df = df.copy()
+
+    df["SMA_20"] = ta.trend.sma_indicator(df["Close"], window=20)
+    df["SMA_50"] = (
+        ta.trend.sma_indicator(df["Close"], window=50)
+        if len(df) >= 50
+        else np.nan
+    )
+    df["RSI"] = ta.momentum.rsi(df["Close"], window=14)
+
+    macd = ta.trend.MACD(df["Close"])
+    df["MACD"] = macd.macd()
+    df["MACD_Signal"] = macd.macd_signal()
+
+    bollinger = ta.volatility.BollingerBands(
+        df["Close"], window=20, window_dev=2
+    )
+    df["BB_Upper"] = bollinger.bollinger_hband()
+    df["BB_Lower"] = bollinger.bollinger_lband()
+    df["BB_Middle"] = bollinger.bollinger_mavg()
+
+    stoch = ta.momentum.StochasticOscillator(
+        df["High"], df["Low"], df["Close"], window=14, smooth_window=3
+    )
+    df["Stoch_K"] = stoch.stoch()
+    df["Stoch_D"] = stoch.stoch_signal()
+
+    df["Williams_R"] = ta.momentum.williams_r(
+        df["High"], df["Low"], df["Close"], lbp=14
+    )
+
     if len(df) >= 14:
-        adx = ta.trend.ADXIndicator(df['High'], df['Low'], df['Close'], window=14)
-        df['ADX'] = adx.adx()
-        df['ADX_Pos'] = adx.adx_pos()
-        df['ADX_Neg'] = adx.adx_neg()
+        adx = ta.trend.ADXIndicator(
+            df["High"], df["Low"], df["Close"], window=14
+        )
+        df["ADX"] = adx.adx()
+        df["ADX_Pos"] = adx.adx_pos()
+        df["ADX_Neg"] = adx.adx_neg()
     else:
-        df['ADX'] = df['ADX_Pos'] = df['ADX_Neg'] = np.nan
+        df["ADX"] = df["ADX_Pos"] = df["ADX_Neg"] = np.nan
+
     if len(df) >= 26:
-        ichimoku = ta.trend.IchimokuIndicator(df['High'], df['Low'])
-        df['Ichimoku_A'] = ichimoku.ichimoku_a()
-        df['Ichimoku_B'] = ichimoku.ichimoku_b()
-        df['Ichimoku_Base'] = ichimoku.ichimoku_base_line()
-        df['Ichimoku_Conversion'] = ichimoku.ichimoku_conversion_line()
+        ichimoku = ta.trend.IchimokuIndicator(df["High"], df["Low"])
+        df["Ichimoku_A"] = ichimoku.ichimoku_a()
+        df["Ichimoku_B"] = ichimoku.ichimoku_b()
+        df["Ichimoku_Base"] = ichimoku.ichimoku_base_line()
+        df["Ichimoku_Conversion"] = ichimoku.ichimoku_conversion_line()
     else:
-        df['Ichimoku_A'] = df['Ichimoku_B'] = df['Ichimoku_Base'] = df['Ichimoku_Conversion'] = np.nan
+        df["Ichimoku_A"] = df["Ichimoku_B"] = np.nan
+        df["Ichimoku_Base"] = df["Ichimoku_Conversion"] = np.nan
+
     return df
 
-def process_with_spark(df):
-    SparkSession = try_import_pyspark()
-    if SparkSession is None:
-        st.warning("PySpark is not installed. Big data processing is unavailable.")
+
+@st.cache_data
+def load_experiment_results():
+    """Load precomputed LSTM experiment metrics (with and without sentiment)."""
+    df_no = None
+    df_with = None
+
+    if os.path.exists("data/results_without_sentiment.parquet"):
+        df_no = pd.read_parquet("data/results_without_sentiment.parquet")
+    if os.path.exists("data/results_with_sentiment.parquet"):
+        df_with = pd.read_parquet("data/results_with_sentiment.parquet")
+
+    return df_no, df_with
+
+
+@st.cache_data
+def load_feature_importance():
+    """Load feature importance or selected indicators (if available)."""
+    path = "data/feature_importance.csv"
+    if os.path.exists(path):
+        return pd.read_csv(path)
+    return None
+
+
+@st.cache_data
+def load_daily_sentiment():
+    """Load daily sentiment time series for visualization (optional)."""
+    path = "data/news_sentiment.parquet"
+    if os.path.exists(path):
+        df = pd.read_parquet(path)
+        # Expect columns: ticker, date, sentiment
         return df
-    spark = SparkSession.builder.appName("StockAnalysis").getOrCreate()
-    spark_df = spark.createDataFrame(df.reset_index())
-    from pyspark.sql.window import Window
-    from pyspark.sql.functions import avg
-    window_spec = Window.orderBy("Date").rowsBetween(-4, 0)
-    spark_df = spark_df.withColumn("Rolling_Close", avg("Close").over(window_spec))
-    return spark_df.toPandas().set_index('Date')
+    return None
 
-def compute_sentiment(news_df):
-    TextBlob = try_import_textblob()
-    if TextBlob is None:
-        st.warning("TextBlob is not installed. Sentiment analysis is unavailable.")
-        news_df['sentiment'] = 0
-        return news_df.groupby('date')['sentiment'].mean().reset_index()
-    sentiments = []
-    for headline in news_df['headline']:
-        polarity = TextBlob(headline).sentiment.polarity
-        sentiments.append(polarity)
-    news_df['sentiment'] = sentiments
-    return news_df.groupby('date')['sentiment'].mean().reset_index()
 
-def predict_next_price(df, model_type='linear', days_ahead=1):
-    df = df.dropna()
-    if len(df) < 2:
-        # Always return 6 outputs to match unpacking in main()
-        return None, None, None, None, None, None
-    X = np.arange(len(df)).reshape(-1, 1)
-    y = df['Close'].values
-    if model_type == 'rf':
-        model = RandomForestRegressor(n_estimators=100, random_state=42)
-    elif model_type == 'xgb':
-        model = XGBRegressor(n_estimators=100, random_state=42)
-    else:
-        model = LinearRegression()
-    model.fit(X, y)
-    prediction = model.predict(np.array([[len(df) + days_ahead - 1]]))[0]
-    r2 = model.score(X, y)
-    rmse = np.sqrt(mean_squared_error(y, model.predict(X)))
-    mae = mean_absolute_error(y, model.predict(X))
-    return prediction, r2, rmse, mae, model, X
+# --------------------------------------------------
+# Main app
+# --------------------------------------------------
 
 def main():
-    st.title("📈 Advanced Stock Market Trend Analysis & Prediction Dashboard")
-    st.markdown("Interactive dashboard with comprehensive indicators, sentiment analysis, and advanced ML for sustainable investing.")
-    st.info("This tool promotes sustainable investing by providing data-driven insights for better economic decisions, aligning with SDG 8 (Decent Work and Economic Growth).")
+    st.title("📈 Stock Trend & Sentiment Dashboard")
+    st.markdown(
+        """
+This dashboard visualizes **trend prediction performance** and 
+**news-based sentiment** on precomputed experiment results, 
+supporting the research pipeline (Spark + indicators + LSTM + sentiment).
+"""
+    )
+    st.info(
+        "The dashboard is a visualization and analysis layer. "
+        "All model training and feature engineering are performed "
+        "in separate research scripts."
+    )
 
-    # Sidebar controls
-    st.sidebar.header("Dashboard Controls")
+    # Sidebar controls (purely for visualization/demo)
+    st.sidebar.header("Controls")
     selected_stock = st.sidebar.selectbox(
-        "Select Stock",
-        options=['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA'],
-        index=0
+        "Select Stock (for demo charts)",
+        options=["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA"],
+        index=0,
     )
     time_frame = st.sidebar.selectbox(
-        "Time Frame",
-        options=['1D', '1W', '1M', '3M'],
-        index=2
+        "Demo Time Frame",
+        options=["1D", "1W", "1M", "3M"],
+        index=2,
     )
-    data_source = st.sidebar.selectbox("Data Source", options=['mock', 'real', 'merged'], index=0)
-    use_spark = st.sidebar.checkbox("Use Spark for Big Data Processing", value=False)
-    use_sentiment = st.sidebar.checkbox("Include Sentiment Analysis", value=False)
-    model_choice = st.sidebar.selectbox("Prediction Model", options=['linear', 'rf', 'xgb'], index=0)
+    data_source = st.sidebar.selectbox(
+        "Price Data Source (for demo chart only)",
+        options=["mock", "real"],
+        index=0,
+    )
 
-    if st.sidebar.button("Refresh Data"):
+    if st.sidebar.button("Refresh Demo Data"):
         st.cache_data.clear()
         st.rerun()
 
-    # Load data based on source
-    with st.spinner("Loading market data..."):
-        if data_source == 'merged':
-            if os.path.exists('data/merged_data.parquet'):
-                df = pd.read_parquet('data/merged_data.parquet')
-            else:
-                st.warning("Merged data not found. Using mock data.")
-                df = generate_mock_data(selected_stock, time_frame)
-        elif data_source == 'real':
+    # --------------------------------------------------
+    # Section 1: LSTM experiment metrics (paper results)
+    # --------------------------------------------------
+    st.subheader("Trend Prediction Performance (LSTM Experiments)")
+
+    df_no_sent, df_with_sent = load_experiment_results()
+
+    if df_no_sent is None or df_with_sent is None:
+        st.warning(
+            "Experiment result files not found. "
+            "Please run train_lstm.py to generate:\n"
+            "- data/results_without_sentiment.parquet\n"
+            "- data/results_with_sentiment.parquet"
+        )
+    else:
+        # Expect single-row summary tables or one row per ticker; use first row for global summary
+        row_no = df_no_sent.iloc[0]
+        row_with = df_with_sent.iloc[0]
+
+        da_no = float(row_no.get("directional_accuracy", np.nan))
+        da_with = float(row_with.get("directional_accuracy", np.nan))
+        mae_no = float(row_no.get("mae", np.nan))
+        mae_with = float(row_with.get("mae", np.nan))
+        rmse_no = float(row_no.get("rmse", np.nan))
+        rmse_with = float(row_with.get("rmse", np.nan))
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("DA (No Sentiment)", f"{da_no:.2%}")
+        with col2:
+            st.metric("DA (With Sentiment)", f"{da_with:.2%}")
+        with col3:
+            delta_da = da_with - da_no
+            st.metric("Δ Directional Accuracy", f"{delta_da:.2%}")
+
+        st.markdown("**Error Metrics (Test Set)**")
+        col4, col5 = st.columns(2)
+        with col4:
+            st.write("Without Sentiment")
+            st.write(f"MAE:  {mae_no:.4f}")
+            st.write(f"RMSE: {rmse_no:.4f}")
+        with col5:
+            st.write("With Sentiment")
+            st.write(f"MAE:  {mae_with:.4f}")
+            st.write(f"RMSE: {rmse_with:.4f}")
+
+    st.markdown("---")
+
+    # --------------------------------------------------
+    # Section 2: Feature importance / selected indicators
+    # --------------------------------------------------
+    st.subheader("Selected Technical Indicators / Feature Importance")
+
+    fi = load_feature_importance()
+    if fi is None:
+        st.info(
+            "Feature importance file not found. "
+            "Once feature_engineering.py saves 'data/feature_importance.csv', "
+            "it will be displayed here."
+        )
+    else:
+        st.dataframe(
+            fi.sort_values(
+                fi.columns[-1], ascending=False
+            ),
+            use_container_width=True,
+        )
+
+    st.markdown("---")
+
+    # --------------------------------------------------
+    # Section 3: Price + indicators demo chart (for one stock)
+    # --------------------------------------------------
+    st.subheader("Price & Technical Indicators (Demo View)")
+
+    # Load demo price data (not used for paper metrics)
+    with st.spinner("Loading demo price data..."):
+        if data_source == "real":
             ticker = yf.Ticker(selected_stock)
-            if time_frame == '1D':
-                df = ticker.history(period='5d', interval='1h')
-            elif time_frame == '1W':
-                df = ticker.history(period='1mo', interval='1d')
+            if time_frame == "1D":
+                demo_df = ticker.history(period="5d", interval="1h")
+            elif time_frame == "1W":
+                demo_df = ticker.history(period="1mo", interval="1d")
             else:
-                df = ticker.history(period=time_frame.lower())
-            if df.empty or len(df) < 5:
-                st.warning("Real data fetch returned insufficient data. Using mock data as fallback.")
-                df = generate_mock_data(selected_stock, time_frame)
+                demo_df = ticker.history(period=time_frame.lower())
+
+            if demo_df.empty or len(demo_df) < 5:
+                st.warning(
+                    "Real data fetch returned insufficient rows. "
+                    "Falling back to mock data."
+                )
+                demo_df = generate_mock_data(selected_stock, time_frame)
         else:
-            df = generate_mock_data(selected_stock, time_frame)
+            demo_df = generate_mock_data(selected_stock, time_frame)
 
-        # Apply Spark processing if enabled
-        if use_spark and len(df) > 100:
-            df = process_with_spark(df)
+    demo_df = calculate_indicators(demo_df)
 
-        # Apply sentiment if enabled
-        if use_sentiment:
-            if os.path.exists('data/news_data.parquet'):
-                news_df = pd.read_parquet('data/news_data.parquet')
-                sentiment_df = compute_sentiment(news_df)
-                df = df.merge(sentiment_df, left_index=True, right_on='date', how='left').fillna(0)
-            else:
-                st.warning("News data not found. Skipping sentiment analysis.")
-
-        df = calculate_indicators(df)
-        latest = df.iloc[-1]
-        prev = df.iloc[-2] if len(df) > 1 else latest
-
-    # Key Metrics Row (expanded)
-    col1, col2, col3, col4, col5 = st.columns(5)
-    with col1:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.metric(
-            label="Current Price",
-            value=f"${latest['Close']:.2f}",
-            delta=f"${latest['Close'] - prev['Close']:.2f} ({((latest['Close'] - prev['Close']) / prev['Close'] * 100):+.2f}%)"
+    if not demo_df.empty:
+        fig = make_subplots(
+            rows=3,
+            cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.03,
+            row_heights=[0.5, 0.25, 0.25],
         )
-        st.markdown('</div>', unsafe_allow_html=True)
-    with col2:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        if 'RSI' in df.columns and not pd.isna(latest['RSI']):
-            rsi = latest['RSI']
-            rsi_status = "Overbought" if rsi > 70 else "Oversold" if rsi < 30 else "Neutral"
-            color_class = "bearish" if rsi > 70 else "bullish" if rsi < 30 else "neutral"
-        else:
-            rsi = "N/A"
-            rsi_status = "Insufficient Data"
-            color_class = "neutral"
-        st.metric(label="RSI (14)", value=f"{rsi}", delta_color="normal")
-        st.caption(f"Status: <span class='{color_class}'>{rsi_status}</span>", unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-    with col3:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        if 'ADX' in df.columns and not pd.isna(latest['ADX']):
-            adx = latest['ADX']
-            trend_strength = "Strong" if adx > 25 else "Weak"
-            color_class = "bullish" if adx > 25 else "neutral"
-        else:
-            adx = "N/A"
-            trend_strength = "Insufficient Data"
-            color_class = "neutral"
-        st.metric(label="ADX (14)", value=f"{adx}", delta_color="normal")
-        st.caption(f"Trend: <span class='{color_class}'>{trend_strength}</span>", unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-    with col4:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        if 'Stoch_K' in df.columns and not pd.isna(latest['Stoch_K']):
-            stoch_k = latest['Stoch_K']
-            stoch_status = "Overbought" if stoch_k > 80 else "Oversold" if stoch_k < 20 else "Neutral"
-            color_class = "bearish" if stoch_k > 80 else "bullish" if stoch_k < 20 else "neutral"
-        else:
-            stoch_k = "N/A"
-            stoch_status = "Insufficient Data"
-            color_class = "neutral"
-        st.metric(label="Stoch %K", value=f"{stoch_k}", delta_color="normal")
-        st.caption(f"Status: <span class='{color_class}'>{stoch_status}</span>", unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-    with col5:
-        prediction, r2, rmse, mae, model, X = predict_next_price(df, model_choice)
-        if prediction:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric(label="Predicted Next Price", value=f"${prediction:.2f}", delta_color="normal")
-            st.caption(f"Model: {model_choice.upper()}, R²: {r2:.2f}, RMSE: {rmse:.2f}, MAE: {mae:.2f}")
-            st.markdown('</div>', unsafe_allow_html=True)
-        else:
-            st.write("Not enough data for prediction.")
 
-    # Model Comparison Section
-    st.subheader("Model Performance Comparison")
-    models = ['linear', 'rf', 'xgb']
-    comparison_data = []
-    for mod in models:
-        pred, r2_val, rmse_val, mae_val, _, _ = predict_next_price(df, mod)
-        if pred is not None:
-            comparison_data.append({'Model': mod.upper(), 'R²': r2_val, 'RMSE': rmse_val, 'MAE': mae_val})
-    if comparison_data:
-        comp_df = pd.DataFrame(comparison_data)
-        st.dataframe(comp_df)
-        st.bar_chart(comp_df.set_index('Model')[['R²']])
-
-    # Explainability Section
-    if prediction and model_choice in ['rf', 'xgb']:
-        st.subheader("Model Explainability (SHAP)")
-        try:
-            explainer = shap.Explainer(model, X)
-            shap_values = explainer(X)
-            st.pyplot(shap.plots.waterfall(shap_values[0]))
-        except Exception as e:
-            st.write(f"SHAP visualization failed: {e}")
-
-    # Charts (expanded) - Handle missing indicators gracefully
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader(f"Price Chart with Indicators - {selected_stock}")
-        fig_price = go.Figure()
-        fig_price.add_trace(go.Candlestick(
-            x=df.index,
-            open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
-            name="OHLC"
-        ))
-        if 'SMA_20' in df.columns:
-            fig_price.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name="SMA 20", line=dict(color='orange')))
-        if 'BB_Upper' in df.columns:
-            fig_price.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], name="BB Upper", line=dict(color='green', dash='dash')))
-            fig_price.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], name="BB Lower", line=dict(color='red', dash='dash')))
-        if 'Ichimoku_A' in df.columns:
-            fig_price.add_trace(go.Scatter(x=df.index, y=df['Ichimoku_A'], name="Ichimoku A", line=dict(color='purple')))
-            fig_price.add_trace(go.Scatter(x=df.index, y=df['Ichimoku_B'], name="Ichimoku B", line=dict(color='blue')))
-        fig_price.update_layout(
-            title=f"{selected_stock} Price with Indicators",
-            xaxis_title="Date", yaxis_title="Price ($)",
-            height=400
+        # Candlestick with SMA / Bollinger
+        fig.add_trace(
+            go.Candlestick(
+                x=demo_df.index,
+                open=demo_df["Open"],
+                high=demo_df["High"],
+                low=demo_df["Low"],
+                close=demo_df["Close"],
+                name="Price",
+            ),
+            row=1,
+            col=1,
         )
-        st.plotly_chart(fig_price, use_container_width=True)
-    with col2:
-        st.subheader("Prediction Chart")
-        if prediction:
-            fig_pred = go.Figure()
-            fig_pred.add_trace(go.Scatter(x=df.index, y=df['Close'], name="Historical Close", mode='lines'))
-            future_date = df.index[-1] + pd.Timedelta(days=1)
-            fig_pred.add_trace(go.Scatter(x=[future_date], y=[prediction], name="Predicted", mode='markers', marker=dict(color='red', size=10)))
-            fig_pred.update_layout(
-                title="Price Prediction",
-                xaxis_title="Date", yaxis_title="Price ($)",
-                height=400
+        if "SMA_20" in demo_df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=demo_df.index,
+                    y=demo_df["SMA_20"],
+                    mode="lines",
+                    name="SMA 20",
+                    line=dict(color="orange"),
+                ),
+                row=1,
+                col=1,
             )
-            st.plotly_chart(fig_pred, use_container_width=True)
-        else:
-            st.write("Not enough data for prediction.")
+        if "BB_Upper" in demo_df.columns and "BB_Lower" in demo_df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=demo_df.index,
+                    y=demo_df["BB_Upper"],
+                    mode="lines",
+                    name="BB Upper",
+                    line=dict(color="gray", width=1),
+                ),
+                row=1,
+                col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=demo_df.index,
+                    y=demo_df["BB_Lower"],
+                    mode="lines",
+                    name="BB Lower",
+                    line=dict(color="gray", width=1),
+                ),
+                row=1,
+                col=1,
+            )
 
-    # Technical Indicators Subplot (expanded) - Handle missing indicators
-    st.subheader("Comprehensive Technical Indicators")
-    fig_indicators = make_subplots(
-        rows=4, cols=1,
-        subplot_titles=('Price & MAs', 'RSI & Williams %R', 'MACD & ADX', 'Stoch & Ichimoku'),
-        vertical_spacing=0.1,
-        row_heights=[0.3, 0.23, 0.23, 0.24]
-    )
-    fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Close'], name="Close", line=dict(color='blue')), row=1, col=1)
-    if 'SMA_20' in df.columns:
-        fig_indicators.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name="SMA 20", line=dict(color='orange')), row=1, col=1)
-    fig_indicators.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
-    fig_indicators.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
-    if 'RSI' in df.columns:
-        fig_indicators.add_trace(go.Scatter(x=df.index, y=df['RSI'], name="RSI", line=dict(color='purple')), row=2, col=1)
-    if 'Williams_R' in df.columns:
-        fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Williams_R'], name="Williams %R", line=dict(color='brown')), row=2, col=1)
-    if 'MACD' in df.columns:
-        fig_indicators.add_trace(go.Scatter(x=df.index, y=df['MACD'], name="MACD", line=dict(color='blue')), row=3, col=1)
-        fig_indicators.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], name="Signal", line=dict(color='red')), row=3, col=1)
-    if 'ADX' in df.columns:
-        fig_indicators.add_trace(go.Scatter(x=df.index, y=df['ADX'], name="ADX", line=dict(color='green')), row=3, col=1)
-    if 'Stoch_K' in df.columns:
-        fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Stoch_K'], name="Stoch %K", line=dict(color='orange')), row=4, col=1)
-        fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Stoch_D'], name="Stoch %D", line=dict(color='yellow')), row=4, col=1)
-    if 'Ichimoku_Conversion' in df.columns:
-        fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Ichimoku_Conversion'], name="Ichimoku Conversion", line=dict(color='purple')), row=4, col=1)
-        fig_indicators.add_trace(go.Scatter(x=df.index, y=df['Ichimoku_Base'], name="Ichimoku Base", line=dict(color='blue')), row=4, col=1)
-    fig_indicators.update_layout(height=800, showlegend=True)
-    st.plotly_chart(fig_indicators, use_container_width=True)
+        # RSI
+        if "RSI" in demo_df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=demo_df.index,
+                    y=demo_df["RSI"],
+                    mode="lines",
+                    name="RSI",
+                    line=dict(color="purple"),
+                ),
+                row=2,
+                col=1,
+            )
 
-    # Data Table
-    st.subheader("Recent Market Data")
-    cols_show = [c for c in ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD', 'ADX', 'Stoch_K'] if c in df.columns]
-    df_display = df[cols_show].tail(10).round(2)
-    st.dataframe(df_display, use_container_width=True)
+        # MACD
+        if "MACD" in demo_df.columns and "MACD_Signal" in demo_df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=demo_df.index,
+                    y=demo_df["MACD"],
+                    mode="lines",
+                    name="MACD",
+                    line=dict(color="blue"),
+                ),
+                row=3,
+                col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=demo_df.index,
+                    y=demo_df["MACD_Signal"],
+                    mode="lines",
+                    name="MACD Signal",
+                    line=dict(color="red"),
+                ),
+                row=3,
+                col=1,
+            )
+
+        fig.update_layout(
+            height=800,
+            showlegend=True,
+            xaxis_rangeslider_visible=False,
+            template="plotly_white",
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("---")
+
+    # --------------------------------------------------
+    # Section 4: Sentiment timeline (optional visualization)
+    # --------------------------------------------------
+    st.subheader("Daily News Sentiment (Aggregated)")
+
+    sentiment_df = load_daily_sentiment()
+    if sentiment_df is None:
+        st.info(
+            "Daily sentiment file not found. "
+            "Once fetch_news.py saves 'data/news_sentiment.parquet', "
+            "aggregated sentiment will be shown here."
+        )
+    else:
+        # If multiple tickers exist, allow filter
+        tickers = sorted(sentiment_df["ticker"].unique())
+        selected_ticker = st.selectbox(
+            "Select Ticker for Sentiment View", options=tickers
+        )
+        sent_sub = sentiment_df[sentiment_df["ticker"] == selected_ticker]
+
+        sent_sub = sent_sub.sort_values("date")
+        fig_sent = go.Figure()
+        fig_sent.add_trace(
+            go.Scatter(
+                x=sent_sub["date"],
+                y=sent_sub["sentiment"],
+                mode="lines+markers",
+                name="Daily Sentiment",
+            )
+        )
+        fig_sent.update_layout(
+            height=300,
+            template="plotly_white",
+            yaxis_title="Sentiment (polarity)",
+        )
+        st.plotly_chart(fig_sent, use_container_width=True)
+
 
 if __name__ == "__main__":
     main()
