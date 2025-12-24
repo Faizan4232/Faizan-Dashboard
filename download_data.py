@@ -2,12 +2,11 @@
 download_data.py - Download S&P 500 historical OHLCV data from Yahoo Finance
 
 Usage:
-
-python download_data.py [--period 1y] [--interval 1d] [--output data/historical_ohlcv.parquet]
+    python download_data.py [--period 1y] [--interval 1d] \
+        [--output data/historical_ohlcv.parquet]
 
 Requires:
-
-pandas, yfinance, requests, tqdm
+    pandas, yfinance, requests, tqdm
 """
 
 import pandas as pd
@@ -47,7 +46,10 @@ def get_sp500_companies():
 
 def download_historical_ohlcv(tickers, period="1y", interval="1d", delay=0.2):
     """Downloads historical OHLCV data for given tickers."""
-    print(f"Downloading historical OHLCV (period={period}, interval={interval})... This may take a while.")
+    print(
+        f"Downloading historical OHLCV (period={period}, interval={interval})... "
+        "This may take a while."
+    )
     data = {}
     errors = []
 
@@ -60,7 +62,9 @@ def download_historical_ohlcv(tickers, period="1y", interval="1d", delay=0.2):
         try:
             stock = yf.Ticker(ticker)
             if start_date and end_date:
-                hist = stock.history(start=start_date, end=end_date, interval=interval)
+                hist = stock.history(
+                    start=start_date, end=end_date, interval=interval
+                )
             else:
                 hist = stock.history(period=period, interval=interval)
 
@@ -79,15 +83,17 @@ def download_historical_ohlcv(tickers, period="1y", interval="1d", delay=0.2):
         return pd.DataFrame()
 
     # Combine into one DataFrame with MultiIndex columns (ticker, field)
-    combined = pd.concat(data, axis=1)  # outer keys=ticker
+    combined = pd.concat(data, axis=1)  # outer keys = ticker
     combined.index.name = "Date"
 
     # Drop tickers that ended up completely NaN
     combined = combined.dropna(axis=1, how="all")
 
-    # Count unique tickers from MultiIndex columns
     unique_tickers = sorted({c[0] for c in combined.columns})
-    print(f"\nSuccessfully downloaded: {len(unique_tickers)} tickers. Missing or failed: {len(errors)}.")
+    print(
+        f"\nSuccessfully downloaded: {len(unique_tickers)} tickers. "
+        f"Missing or failed: {len(errors)}."
+    )
     if errors:
         print("Tickers not found or errored:", ", ".join(errors))
 
@@ -132,9 +138,6 @@ if __name__ == "__main__":
     tickers = get_sp500_companies()
     if tickers:
         ohlcv_df = download_historical_ohlcv(
-            tickers,
-            period=args.period,
-            interval=args.interval,
-            delay=0.2,
+            tickers, period=args.period, interval=args.interval, delay=0.2
         )
         save_ohlcv_data(ohlcv_df, path=args.output)
