@@ -142,131 +142,147 @@
 # train_lstm.py
 # Train LSTM on LAST 7 YEARS of data
 # ==========================================
-
-import pandas as pd
-import numpy as np
 import os
+import numpy as np
+import pandas as pd
 from datetime import timedelta
 
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Input
-from tensorflow.keras.callbacks import EarlyStopping
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-# -------------------------------
-# CONFIG
-# -------------------------------
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
+from tensorflow.keras.callbacks import EarlyStopping
+
+# ==================================================
+# CONFIGURATION
+# ==================================================
 DATA_PATH = "data/master_dataset.parquet"
-MODEL_DIR = "model"
-MODEL_PATH = os.path.join(MODEL_DIR, "lstm_stock_model.h5")
+RESULTS_PATH = "data/results_without_sentiment.parquet"
+MODEL_PATH = "models/lstm_model.keras"
 
-WINDOW_SIZE = 30
+LOOKBACK = 30
 EPOCHS = 10
 BATCH_SIZE = 64
-YEARS_TO_USE = 7
+YEARS = 7
 
-TARGET_COMPANY = None  # None = train on ALL companies, or set "AAPL"
+FEATURES = ["Close", "MA_10", "MA_20"]  # empirically selected
+TARGET = "Close"
 
-# -------------------------------
+# ==================================================
 # LOAD DATA
-# -------------------------------
+# ==================================================
 df = pd.read_parquet(DATA_PATH)
 df["Date"] = pd.to_datetime(df["Date"])
+df = df.sort_values("Date")
 
-# -------------------------------
-# FILTER LAST 7 YEARS
-# -------------------------------
-max_date = df["Date"].max()
-min_date = max_date - pd.DateOffset(years=YEARS_TO_USE)
+end_date = df["Date"].max()
+start_date = end_date - timedelta(days=365 * YEARS)
 
-df = df[df["Date"] >= min_date]
+df = df[df["Date"] >= start_date]
 
-print(f"✅ Training data range: {df['Date'].min().date()} → {df['Date'].max().date()}")
+print(f"✅ Training data range: {start_date.date()} → {end_date.date()}")
+print("✅ Training on ALL companies (last 7 years)")
 
-# -------------------------------
-# OPTIONAL: SINGLE COMPANY
-# -------------------------------
-if TARGET_COMPANY is not None:
-    df = df[df["Company"] == TARGET_COMPANY]
-    print(f"✅ Training on company: {TARGET_COMPANY}")
-else:
-    print("✅ Training on ALL companies (last 7 years)")
+df = df.dropna(subset=FEATURES)
 
-# -------------------------------
-# SORT (CRITICAL)
-# -------------------------------
-df = df.sort_values(["Company", "Date"])
-
-# -------------------------------
-# FEATURE SELECTION
-# -------------------------------
-features = ["Close", "MA_10", "MA_20"]
-data = df[features].values
-
-# -------------------------------
-# SCALING
-# -------------------------------
+# ==================================================
+# SCALE FEATURES
+# ==================================================
 scaler = MinMaxScaler()
-scaled_data = scaler.fit_transform(data)
+scaled_data = scaler.fit_transform(df[FEATURES])
 
-# -------------------------------
-# SEQUENCE CREATION
-# -------------------------------
+# ==================================================
+# CREATE SEQUENCES
+# ==================================================
 X, y = [], []
 
-for i in range(WINDOW_SIZE, len(scaled_data)):
-    X.append(scaled_data[i - WINDOW_SIZE : i])
+for i in range(LOOKBACK, len(scaled_data)):
+    X.append(scaled_data[i - LOOKBACK:i])
     y.append(scaled_data[i, 0])  # Close price
 
 X = np.array(X)
 y = np.array(y)
 
-print("Input shape:", X.shape)
+print(f"Input shape: {X.shape}")
 
-# -------------------------------
-# TIME-BASED SPLIT
-# -------------------------------
-split = int(0.8 * len(X))
+# ==================================================
+# TRAIN–TEST SPLIT (TIME-BASED)
+# ==================================================
+split = int(len(X) * 0.8)
 X_train, X_test = X[:split], X[split:]
 y_train, y_test = y[:split], y[split:]
 
-# -------------------------------
-# MODEL (NO WARNINGS)
-# -------------------------------
+# ==================================================
+# BUILD MODEL
+# ==================================================
 model = Sequential([
-    Input(shape=(WINDOW_SIZE, X.shape[2])),
-    LSTM(32, return_sequences=True),
-    LSTM(32),
+    Input(shape=(LOOKBACK, X.shape[2])),
+    LSTM(64, return_sequences=False),
+    Dropout(0.2),
     Dense(1)
 ])
 
-model.compile(optimizer="adam", loss="mse")
+model.compile(
+    optimizer="adam",
+    loss="mse"
+)
 
-# -------------------------------
-# EARLY STOPPING
-# -------------------------------
+# ==================================================
+# TRAIN MODEL
+# ==================================================
 early_stop = EarlyStopping(
-    monitor="loss",
-    patience=2,
+    monitor="val_loss",
+    patience=3,
     restore_best_weights=True
 )
 
-# -------------------------------
-# TRAIN
-# -------------------------------
 model.fit(
     X_train,
     y_train,
+    validation_split=0.1,
     epochs=EPOCHS,
     batch_size=BATCH_SIZE,
     callbacks=[early_stop],
     verbose=1
 )
 
-# -------------------------------
+# ==================================================
+# EVALUATION (TEST SET)
+# ==================================================
+y_pred = model.predict(X_test, verbose=0).flatten()
+
+mae = mean_absolute_error(y_test, y_pred)
+rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+
+# Directional Accuracy
+y_test_diff = np.sign(np.diff(y_test))
+y_pred_diff = np.sign(np.diff(y_pred))
+directional_accuracy = np.mean(y_test_diff == y_pred_diff)
+
+print("\n📊 TEST SET RESULTS")
+print(f"Directional Accuracy (DA): {directional_accuracy * 100:.2f}%")
+print(f"MAE: {mae:.6f}")
+print(f"RMSE: {rmse:.6f}")
+
+# ==================================================
+# SAVE RESULTS
+# ==================================================
+results_df = pd.DataFrame([{
+    "directional_accuracy": directional_accuracy,
+    "mae": mae,
+    "rmse": rmse,
+    "lookback": LOOKBACK,
+    "years_used": YEARS
+}])
+
+os.makedirs("data", exist_ok=True)
+results_df.to_parquet(RESULTS_PATH, index=False)
+
+# ==================================================
 # SAVE MODEL
-# -------------------------------
-os.makedirs(MODEL_DIR, exist_ok=True)
+# ==================================================
+os.makedirs("models", exist_ok=True)
 model.save(MODEL_PATH)
 
-print("✅ LSTM trained on last 7 years and saved successfully")
+print("\n✅ LSTM trained on last 7 years and saved successfully")
