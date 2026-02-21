@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from datetime import timedelta
 
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, LabelEncoder
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Input, Embedding, Concatenate
 from tensorflow.keras.callbacks import EarlyStopping
 
 # ==================================================
@@ -17,9 +17,9 @@ DATA_PATH = "data/master_dataset.parquet"
 SENTIMENT_PATH = "data/news_sentiment.parquet"
 
 LOOKBACK = 50
-HORIZON = 3                 # 🔥 3-day ahead prediction
-EPOCHS = 10
-BATCH_SIZE = 64
+HORIZON = 3
+EPOCHS = 15
+BATCH_SIZE = 128
 YEARS = 7
 
 BASE_FEATURES = ["Close", "MA_10", "MA_20"]
@@ -33,155 +33,151 @@ os.makedirs("data", exist_ok=True)
 # ==================================================
 price_df = pd.read_parquet(DATA_PATH)
 price_df["Date"] = pd.to_datetime(price_df["Date"])
-price_df = price_df.sort_values("Date")
+price_df = price_df.sort_values(["Company", "Date"])
 
 sent_df = pd.read_parquet(SENTIMENT_PATH)
 sent_df["date"] = pd.to_datetime(sent_df["date"])
-
-# ✅ Automatically detect all companies in the dataset
-COMPANIES = price_df["Company"].unique().tolist()
-print(f"📌 Total companies detected: {len(COMPANIES)}")
+sent_df = sent_df.rename(columns={"date": "Date", "sentiment": "Sentiment"})
 
 # ==================================================
-# TRAIN MODELS
+# FILTER LAST N YEARS (GLOBAL)
 # ==================================================
-for company in COMPANIES:
+end_date = price_df["Date"].max()
+start_date = end_date - timedelta(days=365 * YEARS)
+price_df = price_df[price_df["Date"] >= start_date]
 
-    print("\n" + "=" * 70)
-    print(f"🚀 Training models for {company}")
-    print("=" * 70)
+# ==================================================
+# MERGE SENTIMENT
+# ==================================================
+price_df = price_df.merge(
+    sent_df[["ticker", "Date", "Sentiment"]],
+    left_on=["Company", "Date"],
+    right_on=["ticker", "Date"],
+    how="left"
+)
 
-    # -------------------------------
-    # FILTER PRICE DATA
-    # -------------------------------
-    df = price_df[price_df["Company"] == company].copy()
+price_df["Sentiment"] = price_df["Sentiment"].fillna(0.0)
+price_df.drop(columns=["ticker"], inplace=True)
 
-    end_date = df["Date"].max()
-    start_date = end_date - timedelta(days=365 * YEARS)
-    df = df[df["Date"] >= start_date]
+print(f"📌 Total rows after merge: {len(price_df)}")
 
-    # -------------------------------
-    # MERGE SENTIMENT
-    # -------------------------------
-    s = sent_df[sent_df["ticker"] == company][["date", "sentiment"]]
-    s = s.rename(columns={"date": "Date", "sentiment": "Sentiment"})
+# ==================================================
+# ENCODE COMPANY AS ID
+# ==================================================
+le = LabelEncoder()
+price_df["company_id"] = le.fit_transform(price_df["Company"])
+num_companies = price_df["company_id"].nunique()
 
-    df = df.merge(s, on="Date", how="left")
-    df["Sentiment"] = df["Sentiment"].fillna(0.0)
+# ==================================================
+# BUILD SEQUENCES (GLOBAL)
+# ==================================================
+features = BASE_FEATURES + SENTIMENT_FEATURE
+scaler = MinMaxScaler()
+price_df[features] = scaler.fit_transform(price_df[features])
 
-    print(f"📅 Data range: {start_date.date()} → {end_date.date()}")
+X_price, X_company, y = [], [], []
 
-    # ==================================================
-    # FUNCTION: TRAIN + EVALUATE
-    # ==================================================
-    def train_model(feature_cols, tag):
+for cid in price_df["company_id"].unique():
 
-        data = df.dropna(subset=feature_cols)
+    df = price_df[price_df["company_id"] == cid].copy()
 
-        scaler = MinMaxScaler()
-        scaled = scaler.fit_transform(data[feature_cols])
+    for i in range(LOOKBACK, len(df) - HORIZON):
+        X_price.append(df[features].iloc[i - LOOKBACK:i].values)
+        X_company.append(cid)
+        y.append(df["Close"].iloc[i + HORIZON])
 
-        X, y = [], []
-        for i in range(LOOKBACK, len(scaled) - HORIZON):
-            X.append(scaled[i - LOOKBACK:i])
-            y.append(scaled[i + HORIZON, 0])   # 🔥 3-day ahead Close
+X_price = np.array(X_price)
+X_company = np.array(X_company)
+y = np.array(y)
 
-        X = np.array(X)
-        y = np.array(y)
+print(f"📦 Total sequences built: {len(X_price)}")
 
-        if len(X) == 0:
-            print(f"⚠️ Skipping {company} due to insufficient data")
-            return None, None, None
+# ==================================================
+# TRAIN / TEST SPLIT (TIME-AWARE)
+# ==================================================
+split = int(len(X_price) * 0.8)
 
-        split = int(len(X) * 0.8)
-        X_train, X_test = X[:split], X[split:]
-        y_train, y_test = y[:split], y[split:]
+X_price_train, X_price_test = X_price[:split], X_price[split:]
+X_company_train, X_company_test = X_company[:split], X_company[split:]
+y_train, y_test = y[:split], y[split:]
 
-        model = Sequential([
-            Input(shape=(LOOKBACK, X.shape[2])),
-            LSTM(64),
-            Dropout(0.2),
-            Dense(1)
-        ])
+# ==================================================
+# MODEL: GLOBAL LSTM + COMPANY EMBEDDING
+# ==================================================
+price_input = Input(shape=(LOOKBACK, len(features)), name="price_input")
+company_input = Input(shape=(1,), name="company_input")
 
-        model.compile(optimizer="adam", loss="mse")
+company_emb = Embedding(
+    input_dim=num_companies,
+    output_dim=8
+)(company_input)
+company_emb = Dense(8, activation="relu")(company_emb)
 
-        early_stop = EarlyStopping(
-            monitor="val_loss",
-            patience=3,
-            restore_best_weights=True
-        )
+x = LSTM(64)(price_input)
+x = Dropout(0.2)(x)
 
-        model.fit(
-            X_train,
-            y_train,
-            validation_split=0.1,
-            epochs=EPOCHS,
-            batch_size=BATCH_SIZE,
-            callbacks=[early_stop],
-            verbose=0
-        )
+x = Concatenate()([x, company_emb[:, 0, :]])
+output = Dense(1)(x)
 
-        y_pred = model.predict(X_test, verbose=0).flatten()
+model = Model(
+    inputs=[price_input, company_input],
+    outputs=output
+)
 
-        mae = mean_absolute_error(y_test, y_pred)
-        rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+model.compile(
+    optimizer="adam",
+    loss="mse"
+)
 
-        # 🔹 Directional Accuracy (%)
-        da = np.mean(
-            np.sign(np.diff(y_test)) ==
-            np.sign(np.diff(y_pred))
-        ) * 100
+model.summary()
 
-        model.save(f"models/lstm_{company}_{tag}.keras")
+# ==================================================
+# TRAIN
+# ==================================================
+early_stop = EarlyStopping(
+    monitor="val_loss",
+    patience=5,
+    restore_best_weights=True
+)
 
-        return da, mae, rmse
+model.fit(
+    [X_price_train, X_company_train],
+    y_train,
+    validation_split=0.1,
+    epochs=EPOCHS,
+    batch_size=BATCH_SIZE,
+    callbacks=[early_stop],
+    verbose=1
+)
 
-    # ==================================================
-    # EXPERIMENT 1: WITHOUT SENTIMENT
-    # ==================================================
-    da_ns, mae_ns, rmse_ns = train_model(
-        BASE_FEATURES,
-        "no_sentiment"
-    )
+# ==================================================
+# EVALUATE
+# ==================================================
+y_pred = model.predict([X_price_test, X_company_test], verbose=0).flatten()
 
-    # ==================================================
-    # EXPERIMENT 2: WITH SENTIMENT
-    # ==================================================
-    da_s, mae_s, rmse_s = train_model(
-        BASE_FEATURES + SENTIMENT_FEATURE,
-        "with_sentiment"
-    )
+mae = mean_absolute_error(y_test, y_pred)
+rmse = np.sqrt(mean_squared_error(y_test, y_pred))
 
-    # ==================================================
-    # SAVE RESULTS (DA IN %)
-    # ==================================================
-    results = pd.DataFrame([
-        {
-            "company": company,
-            "model": "LSTM (No Sentiment)",
-            "directional_accuracy_percent": round(da_ns, 2),
-            "mae": mae_ns,
-            "rmse": rmse_ns
-        },
-        {
-            "company": company,
-            "model": "LSTM + Sentiment",
-            "directional_accuracy_percent": round(da_s, 2),
-            "mae": mae_s,
-            "rmse": rmse_s
-        }
-    ])
+directional_accuracy = np.mean(
+    np.sign(np.diff(y_test)) ==
+    np.sign(np.diff(y_pred))
+) * 100
 
-    results.to_parquet(
-        f"data/results_{company}_sentiment.parquet",
-        index=False
-    )
+print("\n📊 GLOBAL S&P 500 RESULTS")
+print(f"Directional Accuracy (%): {directional_accuracy:.2f}")
+print(f"MAE: {mae:.4f}")
+print(f"RMSE: {rmse:.4f}")
 
-    # ==================================================
-    # PRINT RESULTS (CLEAN)
-    # ==================================================
-    print(f"\n📊 FINAL RESULTS FOR {company}")
-    print(results)
+# ==================================================
+# SAVE RESULTS
+# ==================================================
+model.save("models/lstm_sp500_global.keras")
 
-print("\n🎉 ALL SENTIMENT EXPERIMENTS COMPLETED SUCCESSFULLY")
+pd.DataFrame([{
+    "model": "Global LSTM + Sentiment",
+    "directional_accuracy_percent": round(directional_accuracy, 2),
+    "mae": mae,
+    "rmse": rmse
+}]).to_csv("data/results_sp500_global_lstm.csv", index=False)
+
+print("\n🎉 GLOBAL S&P 500 LSTM TRAINING COMPLETED")
