@@ -3,27 +3,28 @@ import numpy as np
 import pandas as pd
 from datetime import timedelta
 
-from sklearn.preprocessing import MinMaxScaler, LabelEncoder
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import LSTM, Dense, Dropout, Input, Embedding, Concatenate
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
 
 # ==================================================
-# CONFIGURATION
+# CONFIGURATION (FAST + JOURNAL SAFE)
 # ==================================================
 DATA_PATH = "data/master_dataset.parquet"
 SENTIMENT_PATH = "data/news_sentiment.parquet"
 
-LOOKBACK = 50
-HORIZON = 3
-EPOCHS = 15
-BATCH_SIZE = 128
-YEARS = 7
+LOOKBACK = 15          # 🔥 reduced (major speed gain)
+HORIZON = 1
+EPOCHS = 30
+BATCH_SIZE = 512       # 🔥 fewer steps per epoch
+YEARS = 10
 
-BASE_FEATURES = ["Close", "MA_10", "MA_20"]
-SENTIMENT_FEATURE = ["Sentiment"]
+BASE_FEATURES = ["Close"]
+OPTIONAL_FEATURES = ["MA_10", "MA_20"]
 
 os.makedirs("models", exist_ok=True)
 os.makedirs("data", exist_ok=True)
@@ -31,101 +32,107 @@ os.makedirs("data", exist_ok=True)
 # ==================================================
 # LOAD DATA
 # ==================================================
-price_df = pd.read_parquet(DATA_PATH)
-price_df["Date"] = pd.to_datetime(price_df["Date"])
-price_df = price_df.sort_values(["Company", "Date"])
+df = pd.read_parquet(DATA_PATH)
 
-sent_df = pd.read_parquet(SENTIMENT_PATH)
-sent_df["date"] = pd.to_datetime(sent_df["date"])
-sent_df = sent_df.rename(columns={"date": "Date", "sentiment": "Sentiment"})
+df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+df = df.dropna(subset=["Date"])
 
-# ==================================================
-# FILTER LAST N YEARS (GLOBAL)
-# ==================================================
-end_date = price_df["Date"].max()
+end_date = df["Date"].max()
 start_date = end_date - timedelta(days=365 * YEARS)
-price_df = price_df[price_df["Date"] >= start_date]
+df = df[df["Date"] >= start_date]
 
 # ==================================================
-# MERGE SENTIMENT
+# MERGE SENTIMENT (SAFE)
 # ==================================================
-price_df = price_df.merge(
-    sent_df[["ticker", "Date", "Sentiment"]],
-    left_on=["Company", "Date"],
-    right_on=["ticker", "Date"],
-    how="left"
+if os.path.exists(SENTIMENT_PATH):
+    sent = pd.read_parquet(SENTIMENT_PATH)
+    sent["date"] = pd.to_datetime(sent["date"], errors="coerce")
+    sent = sent.rename(columns={"date": "Date", "sentiment": "Sentiment"})
+
+    df = df.merge(
+        sent[["ticker", "Date", "Sentiment"]],
+        left_on=["Company", "Date"],
+        right_on=["ticker", "Date"],
+        how="left"
+    )
+    df["Sentiment"] = df["Sentiment"].fillna(0.0)
+    df.drop(columns=["ticker"], inplace=True)
+else:
+    df["Sentiment"] = 0.0
+
+# ==================================================
+# FEATURE SELECTION
+# ==================================================
+FEATURES = []
+
+for c in BASE_FEATURES:
+    if c in df.columns:
+        FEATURES.append(c)
+
+for c in OPTIONAL_FEATURES:
+    if c in df.columns:
+        FEATURES.append(c)
+
+FEATURES.append("Sentiment")
+
+print(f"📌 Features used: {FEATURES}")
+
+# ==================================================
+# SORT + LOG RETURNS
+# ==================================================
+df = df.sort_values(["Company", "Date"])
+df["log_return"] = np.log(df["Close"] / df["Close"].shift(1))
+df = df.dropna(subset=["log_return"])
+
+# ==================================================
+# SCALE ONCE (GLOBAL)
+# ==================================================
+scaler = StandardScaler()
+df[FEATURES + ["log_return"]] = scaler.fit_transform(
+    df[FEATURES + ["log_return"]]
 )
 
-price_df["Sentiment"] = price_df["Sentiment"].fillna(0.0)
-price_df.drop(columns=["ticker"], inplace=True)
-
-print(f"📌 Total rows after merge: {len(price_df)}")
-
 # ==================================================
-# ENCODE COMPANY AS ID
+# BUILD SEQUENCES (FAST, NUMPY-ONLY)
 # ==================================================
-le = LabelEncoder()
-price_df["company_id"] = le.fit_transform(price_df["Company"])
-num_companies = price_df["company_id"].nunique()
+X, y = [], []
+skipped = 0
 
-# ==================================================
-# BUILD SEQUENCES (GLOBAL)
-# ==================================================
-features = BASE_FEATURES + SENTIMENT_FEATURE
-scaler = MinMaxScaler()
-price_df[features] = scaler.fit_transform(price_df[features])
+for company in df["Company"].unique():
+    sub = df[df["Company"] == company]
+    if len(sub) < LOOKBACK + HORIZON:
+        skipped += 1
+        continue
 
-X_price, X_company, y = [], [], []
+    vals = sub[FEATURES + ["log_return"]].values
 
-for cid in price_df["company_id"].unique():
+    for i in range(LOOKBACK, len(vals) - HORIZON):
+        X.append(vals[i - LOOKBACK:i, :-1])
+        y.append(vals[i + HORIZON, -1])
 
-    df = price_df[price_df["company_id"] == cid].copy()
+X = np.asarray(X, dtype=np.float32)
+y = np.asarray(y, dtype=np.float32)
 
-    for i in range(LOOKBACK, len(df) - HORIZON):
-        X_price.append(df[features].iloc[i - LOOKBACK:i].values)
-        X_company.append(cid)
-        y.append(df["Close"].iloc[i + HORIZON])
-
-X_price = np.array(X_price)
-X_company = np.array(X_company)
-y = np.array(y)
-
-print(f"📦 Total sequences built: {len(X_price)}")
+print(f"📦 Sequences: {len(X)} | Skipped companies: {skipped}")
 
 # ==================================================
 # TRAIN / TEST SPLIT (TIME-AWARE)
 # ==================================================
-split = int(len(X_price) * 0.8)
-
-X_price_train, X_price_test = X_price[:split], X_price[split:]
-X_company_train, X_company_test = X_company[:split], X_company[split:]
+split = int(len(X) * 0.8)
+X_train, X_test = X[:split], X[split:]
 y_train, y_test = y[:split], y[split:]
 
 # ==================================================
-# MODEL: GLOBAL LSTM + COMPANY EMBEDDING
+# FAST LSTM MODEL (NO ATTENTION)
 # ==================================================
-price_input = Input(shape=(LOOKBACK, len(features)), name="price_input")
-company_input = Input(shape=(1,), name="company_input")
-
-company_emb = Embedding(
-    input_dim=num_companies,
-    output_dim=8
-)(company_input)
-company_emb = Dense(8, activation="relu")(company_emb)
-
-x = LSTM(64)(price_input)
-x = Dropout(0.2)(x)
-
-x = Concatenate()([x, company_emb[:, 0, :]])
-output = Dense(1)(x)
-
-model = Model(
-    inputs=[price_input, company_input],
-    outputs=output
-)
+model = Sequential([
+    LSTM(64, input_shape=(LOOKBACK, X.shape[2])),
+    Dropout(0.25),
+    Dense(1)
+])
 
 model.compile(
-    optimizer="adam",
+    optimizer=tf.keras.optimizers.Adam(1e-3),
     loss="mse"
 )
 
@@ -135,13 +142,12 @@ model.summary()
 # TRAIN
 # ==================================================
 early_stop = EarlyStopping(
-    monitor="val_loss",
-    patience=5,
+    patience=6,
     restore_best_weights=True
 )
 
 model.fit(
-    [X_price_train, X_company_train],
+    X_train,
     y_train,
     validation_split=0.1,
     epochs=EPOCHS,
@@ -151,33 +157,31 @@ model.fit(
 )
 
 # ==================================================
-# EVALUATE
+# EVALUATION
 # ==================================================
-y_pred = model.predict([X_price_test, X_company_test], verbose=0).flatten()
+y_pred = model.predict(X_test, batch_size=1024).flatten()
 
 mae = mean_absolute_error(y_test, y_pred)
 rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-
-directional_accuracy = np.mean(
-    np.sign(np.diff(y_test)) ==
-    np.sign(np.diff(y_pred))
-) * 100
-
-print("\n📊 GLOBAL S&P 500 RESULTS")
-print(f"Directional Accuracy (%): {directional_accuracy:.2f}")
-print(f"MAE: {mae:.4f}")
-print(f"RMSE: {rmse:.4f}")
+mape = np.mean(np.abs((y_test - y_pred) / y_test)) * 100
+directional_accuracy = (
+    np.mean(np.sign(y_test) == np.sign(y_pred)) * 100
+)
 
 # ==================================================
 # SAVE RESULTS
 # ==================================================
-model.save("models/lstm_sp500_global.keras")
+results = pd.DataFrame([{
+    "Model": "Fast LSTM (Journal Optimized)",
+    "MAE": round(mae, 4),
+    "MAPE": round(mape, 4),
+    "RMSE": round(rmse, 4),
+    "Directional_Accuracy_%": round(directional_accuracy, 2)
+}])
 
-pd.DataFrame([{
-    "model": "Global LSTM + Sentiment",
-    "directional_accuracy_percent": round(directional_accuracy, 2),
-    "mae": mae,
-    "rmse": rmse
-}]).to_csv("data/results_sp500_global_lstm.csv", index=False)
+results.to_csv("data/fast_journal_results.csv", index=False)
+model.save("models/fast_journal_lstm.keras")
 
-print("\n🎉 GLOBAL S&P 500 LSTM TRAINING COMPLETED")
+print("\n📊 FINAL FAST RESULTS")
+print(results)
+print("\n✅ TRAINING FINISHED (FAST MODE)")

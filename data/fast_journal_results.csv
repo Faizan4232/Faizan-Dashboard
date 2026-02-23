@@ -1,0 +1,2 @@
+Model,MAE,MAPE,RMSE,Directional_Accuracy_%
+Fast LSTM (Journal Optimized),0.3293,791.0669,0.5188,51.86

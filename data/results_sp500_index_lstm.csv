@@ -1,0 +1,2 @@
+model,directional_accuracy_percent,mae,rmse
+S&P 500 Index LSTM + Sentiment,46.92,0.030382089235225954,0.036789669930036184

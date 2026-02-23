@@ -1,0 +1,3 @@
+Machine Learning Model,MAE,MAPE,RMSE
+LSTM (without lag in price),0.0281,4.9543,0.0391
+LSTM (with lag in price),0.0282,4.997,0.0398
