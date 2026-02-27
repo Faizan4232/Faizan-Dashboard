@@ -83,7 +83,7 @@ def main():
 
     time_frame = st.sidebar.selectbox(
         "Time Frame",
-        ["1W", "1M", "3M", "6M", "1Y", "ALL"]
+        ["1M", "3M", "6M", "1Y", "ALL"]
     )
 
     chart_mode = st.sidebar.selectbox(
@@ -250,7 +250,5 @@ def main():
     else:
         st.info("Sentiment data not available.")
 
-
-# ==================================================
 if __name__ == "__main__":
     main()
