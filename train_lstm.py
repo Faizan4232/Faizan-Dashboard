@@ -184,40 +184,52 @@
 
 # print("\n🎉 ALL SENTIMENT EXPERIMENTS COMPLETED SUCCESSFULLY")
 
+#JOURNAL LEVEL S&P500 FULL DATA 
 import os
 import numpy as np
 import pandas as pd
 from datetime import timedelta
 
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.metrics import (
+    accuracy_score,
+    roc_auc_score,
+    f1_score,
+    matthews_corrcoef
+)
 
 import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import (
+    Input,
+    LSTM,
+    Dense,
+    Dropout,
+    BatchNormalization
+)
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 # ==================================================
-# CONFIGURATION (FAST + JOURNAL SAFE)
+# CONFIGURATION
 # ==================================================
 DATA_PATH = "data/master_dataset.parquet"
 SENTIMENT_PATH = "data/news_sentiment.parquet"
 
-LOOKBACK = 15          # 🔥 reduced (major speed gain)
-HORIZON = 1
-EPOCHS = 30
-BATCH_SIZE = 512       # 🔥 fewer steps per epoch
-YEARS = 10
-
-BASE_FEATURES = ["Close"]
-OPTIONAL_FEATURES = ["MA_10", "MA_20"]
+YEARS = 7
+LOOKBACK = 20
+EPOCHS = 35
+BATCH_SIZE = 2048
 
 os.makedirs("models", exist_ok=True)
 os.makedirs("data", exist_ok=True)
 
+tf.random.set_seed(42)
+np.random.seed(42)
+
 # ==================================================
 # LOAD DATA
 # ==================================================
+print("📥 Loading dataset...")
 df = pd.read_parquet(DATA_PATH)
 
 df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
@@ -227,12 +239,14 @@ end_date = df["Date"].max()
 start_date = end_date - timedelta(days=365 * YEARS)
 df = df[df["Date"] >= start_date]
 
+print("Companies:", df["Company"].nunique())
+
 # ==================================================
-# MERGE SENTIMENT (SAFE)
+# MERGE SENTIMENT
 # ==================================================
 if os.path.exists(SENTIMENT_PATH):
     sent = pd.read_parquet(SENTIMENT_PATH)
-    sent["date"] = pd.to_datetime(sent["date"], errors="coerce")
+    sent["date"] = pd.to_datetime(sent["date"])
     sent = sent.rename(columns={"date": "Date", "sentiment": "Sentiment"})
 
     df = df.merge(
@@ -241,96 +255,149 @@ if os.path.exists(SENTIMENT_PATH):
         right_on=["ticker", "Date"],
         how="left"
     )
+
     df["Sentiment"] = df["Sentiment"].fillna(0.0)
     df.drop(columns=["ticker"], inplace=True)
 else:
     df["Sentiment"] = 0.0
 
 # ==================================================
-# FEATURE SELECTION
-# ==================================================
-FEATURES = []
-
-for c in BASE_FEATURES:
-    if c in df.columns:
-        FEATURES.append(c)
-
-for c in OPTIONAL_FEATURES:
-    if c in df.columns:
-        FEATURES.append(c)
-
-FEATURES.append("Sentiment")
-
-print(f"📌 Features used: {FEATURES}")
-
-# ==================================================
-# SORT + LOG RETURNS
+# FEATURE ENGINEERING
 # ==================================================
 df = df.sort_values(["Company", "Date"])
-df["log_return"] = np.log(df["Close"] / df["Close"].shift(1))
-df = df.dropna(subset=["log_return"])
 
-# ==================================================
-# SCALE ONCE (GLOBAL)
-# ==================================================
-scaler = StandardScaler()
-df[FEATURES + ["log_return"]] = scaler.fit_transform(
-    df[FEATURES + ["log_return"]]
+df["log_return"] = np.log(
+    df["Close"] / df.groupby("Company")["Close"].shift(1)
 )
 
-# ==================================================
-# BUILD SEQUENCES (FAST, NUMPY-ONLY)
-# ==================================================
-X, y = [], []
-skipped = 0
+df["Volatility_10"] = (
+    df.groupby("Company")["log_return"]
+    .rolling(10)
+    .std()
+    .reset_index(level=0, drop=True)
+)
 
-for company in df["Company"].unique():
-    sub = df[df["Company"] == company]
-    if len(sub) < LOOKBACK + HORIZON:
-        skipped += 1
-        continue
+df["Momentum_5"] = df.groupby("Company")["Close"].pct_change(5)
 
-    vals = sub[FEATURES + ["log_return"]].values
+if "Volume" in df.columns:
+    df["Volume_Change"] = df.groupby("Company")["Volume"].pct_change()
+else:
+    df["Volume_Change"] = 0
 
-    for i in range(LOOKBACK, len(vals) - HORIZON):
-        X.append(vals[i - LOOKBACK:i, :-1])
-        y.append(vals[i + HORIZON, -1])
-
-X = np.asarray(X, dtype=np.float32)
-y = np.asarray(y, dtype=np.float32)
-
-print(f"📦 Sequences: {len(X)} | Skipped companies: {skipped}")
+# Target (next day direction)
+df["Direction"] = (
+    df.groupby("Company")["log_return"]
+    .shift(-1) > 0
+).astype(int)
 
 # ==================================================
-# TRAIN / TEST SPLIT (TIME-AWARE)
+# REMOVE NaN AND INF (CRITICAL FIX)
 # ==================================================
-split = int(len(X) * 0.8)
-X_train, X_test = X[:split], X[split:]
-y_train, y_test = y[:split], y[split:]
+df.replace([np.inf, -np.inf], np.nan, inplace=True)
+df = df.dropna()
 
 # ==================================================
-# FAST LSTM MODEL (NO ATTENTION)
+# FEATURES
 # ==================================================
-model = Sequential([
-    LSTM(64, input_shape=(LOOKBACK, X.shape[2])),
-    Dropout(0.25),
-    Dense(1)
-])
+FEATURES = [
+    "Close",
+    "Sentiment",
+    "Volatility_10",
+    "Momentum_5",
+    "Volume_Change"
+]
+
+FEATURES = [f for f in FEATURES if f in df.columns]
+
+# ==================================================
+# TIME SPLIT
+# ==================================================
+split_date = df["Date"].quantile(0.8)
+
+train_df = df[df["Date"] <= split_date].copy()
+test_df = df[df["Date"] > split_date].copy()
+
+# ==================================================
+# SCALE FEATURES
+# ==================================================
+scaler = StandardScaler()
+train_df[FEATURES] = scaler.fit_transform(train_df[FEATURES])
+test_df[FEATURES] = scaler.transform(test_df[FEATURES])
+
+# ==================================================
+# SEQUENCE CREATION
+# ==================================================
+def create_sequences(data):
+    X, y = [], []
+
+    for company in data["Company"].unique():
+        sub = data[data["Company"] == company]
+        values = sub[FEATURES + ["Direction"]].values
+
+        if len(values) < LOOKBACK:
+            continue
+
+        for i in range(LOOKBACK, len(values)):
+            X.append(values[i-LOOKBACK:i, :-1])
+            y.append(values[i, -1])
+
+    return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
+
+print("⚙ Creating sequences...")
+X_train, y_train = create_sequences(train_df)
+X_test, y_test = create_sequences(test_df)
+
+print("Train sequences:", len(X_train))
+print("Test sequences:", len(X_test))
+
+# ==================================================
+# LSTM MODEL
+# ==================================================
+inputs = Input(shape=(LOOKBACK, X_train.shape[2]))
+
+x = LSTM(128, return_sequences=True)(inputs)
+x = BatchNormalization()(x)
+x = Dropout(0.3)(x)
+
+x = LSTM(64)(x)
+x = BatchNormalization()(x)
+x = Dropout(0.3)(x)
+
+x = Dense(32, activation="relu")(x)
+x = Dropout(0.2)(x)
+
+outputs = Dense(1, activation="sigmoid")(x)
+
+model = Model(inputs, outputs)
 
 model.compile(
     optimizer=tf.keras.optimizers.Adam(1e-3),
-    loss="mse"
+    loss="binary_crossentropy",
+    metrics=["accuracy"]
 )
 
 model.summary()
 
 # ==================================================
-# TRAIN
+# CALLBACKS
 # ==================================================
 early_stop = EarlyStopping(
-    patience=6,
+    monitor="val_loss",
+    patience=7,
     restore_best_weights=True
 )
+
+reduce_lr = ReduceLROnPlateau(
+    monitor="val_loss",
+    factor=0.5,
+    patience=3,
+    verbose=1
+)
+
+# ==================================================
+# TRAIN
+# ==================================================
+print("🚀 Training...")
 
 model.fit(
     X_train,
@@ -338,36 +405,35 @@ model.fit(
     validation_split=0.1,
     epochs=EPOCHS,
     batch_size=BATCH_SIZE,
-    callbacks=[early_stop],
+    callbacks=[early_stop, reduce_lr],
     verbose=1
 )
 
 # ==================================================
 # EVALUATION
 # ==================================================
-y_pred = model.predict(X_test, batch_size=1024).flatten()
+print("📊 Evaluating...")
 
-mae = mean_absolute_error(y_test, y_pred)
-rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-mape = np.mean(np.abs((y_test - y_pred) / y_test)) * 100
-directional_accuracy = (
-    np.mean(np.sign(y_test) == np.sign(y_pred)) * 100
-)
+y_prob = model.predict(X_test, batch_size=4096).flatten()
+y_pred = (y_prob > 0.5).astype(int)
 
-# ==================================================
-# SAVE RESULTS
-# ==================================================
+accuracy = accuracy_score(y_test, y_pred)
+auc = roc_auc_score(y_test, y_prob)
+f1 = f1_score(y_test, y_pred)
+mcc = matthews_corrcoef(y_test, y_pred)
+
 results = pd.DataFrame([{
-    "Model": "Fast LSTM (Journal Optimized)",
-    "MAE": round(mae, 4),
-    "MAPE": round(mape, 4),
-    "RMSE": round(rmse, 4),
-    "Directional_Accuracy_%": round(directional_accuracy, 2)
+    "Model": "Journal LSTM - 7Y S&P500",
+    "Companies": df["Company"].nunique(),
+    "Accuracy_%": round(accuracy * 100, 2),
+    "ROC_AUC": round(auc, 4),
+    "F1_Score": round(f1, 4),
+    "MCC": round(mcc, 4)
 }])
 
-results.to_csv("data/fast_journal_results.csv", index=False)
-model.save("models/fast_journal_lstm.keras")
+results.to_csv("data/sp500_journal_lstm_results.csv", index=False)
+model.save("models/sp500_journal_lstm.keras")
 
-print("\n📊 FINAL FAST RESULTS")
+print("\n📊 FINAL RESULTS")
 print(results)
-print("\n✅ TRAINING FINISHED (FAST MODE)")
+print("\n✅ TRAINING COMPLETE")

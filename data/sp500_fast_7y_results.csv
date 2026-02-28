@@ -1,0 +1,2 @@
+Model,Companies,MAE,MAPE,RMSE,Directional_Accuracy_%
+Fast LSTM - 7Y Full S&P500,501,0.013714,27190.527,0.021455,51.57
