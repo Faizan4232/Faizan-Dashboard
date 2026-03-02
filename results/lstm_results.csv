@@ -1,0 +1,7 @@
+Company,Model,DA (%),MAE,RMSE
+AAPL,LSTM (No Sentiment),50.75,0.1337,0.1736
+AAPL,LSTM + Sentiment,48.96,0.2939,0.3335
+MSFT,LSTM (No Sentiment),48.36,0.1509,0.2002
+MSFT,LSTM + Sentiment,46.57,0.1433,0.1982
+TSLA,LSTM (No Sentiment),48.36,0.1463,0.1883
+TSLA,LSTM + Sentiment,47.76,0.0958,0.1314
