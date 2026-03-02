@@ -191,40 +191,29 @@ import pandas as pd
 from datetime import timedelta
 
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import (
-    accuracy_score,
-    roc_auc_score,
-    f1_score,
-    matthews_corrcoef
-)
+from sklearn.metrics import accuracy_score, roc_auc_score, f1_score, matthews_corrcoef
 
 import tensorflow as tf
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import (
-    Input,
-    LSTM,
-    Dense,
-    Dropout,
-    BatchNormalization
-)
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
 
 # ==================================================
-# CONFIGURATION
+# CONFIGURATION (CPU FAST MODE)
 # ==================================================
 DATA_PATH = "data/master_dataset.parquet"
 SENTIMENT_PATH = "data/news_sentiment.parquet"
 
-YEARS = 7
-LOOKBACK = 20
-EPOCHS = 35
-BATCH_SIZE = 2048
+YEARS = 7          # change to 7 for faster experiments
+LOOKBACK = 10       # very important for speed
+EPOCHS = 20
+BATCH_SIZE = 1024   # better for CPU than 2048
 
 os.makedirs("models", exist_ok=True)
 os.makedirs("data", exist_ok=True)
 
-tf.random.set_seed(42)
 np.random.seed(42)
+tf.random.set_seed(42)
 
 # ==================================================
 # LOAD DATA
@@ -270,40 +259,34 @@ df["log_return"] = np.log(
     df["Close"] / df.groupby("Company")["Close"].shift(1)
 )
 
-df["Volatility_10"] = (
+df["Volatility_5"] = (
     df.groupby("Company")["log_return"]
-    .rolling(10)
+    .rolling(5)
     .std()
     .reset_index(level=0, drop=True)
 )
 
-df["Momentum_5"] = df.groupby("Company")["Close"].pct_change(5)
+df["Momentum_3"] = df.groupby("Company")["Close"].pct_change(3)
 
 if "Volume" in df.columns:
     df["Volume_Change"] = df.groupby("Company")["Volume"].pct_change()
 else:
     df["Volume_Change"] = 0
 
-# Target (next day direction)
 df["Direction"] = (
     df.groupby("Company")["log_return"]
     .shift(-1) > 0
 ).astype(int)
 
-# ==================================================
-# REMOVE NaN AND INF (CRITICAL FIX)
-# ==================================================
+# Clean bad values
 df.replace([np.inf, -np.inf], np.nan, inplace=True)
 df = df.dropna()
 
-# ==================================================
-# FEATURES
-# ==================================================
 FEATURES = [
     "Close",
     "Sentiment",
-    "Volatility_10",
-    "Momentum_5",
+    "Volatility_5",
+    "Momentum_3",
     "Volume_Change"
 ]
 
@@ -318,22 +301,20 @@ train_df = df[df["Date"] <= split_date].copy()
 test_df = df[df["Date"] > split_date].copy()
 
 # ==================================================
-# SCALE FEATURES
+# SCALE
 # ==================================================
 scaler = StandardScaler()
 train_df[FEATURES] = scaler.fit_transform(train_df[FEATURES])
 test_df[FEATURES] = scaler.transform(test_df[FEATURES])
 
 # ==================================================
-# SEQUENCE CREATION
+# SEQUENCE CREATION (FAST NUMPY)
 # ==================================================
 def create_sequences(data):
     X, y = [], []
 
-    for company in data["Company"].unique():
-        sub = data[data["Company"] == company]
-        values = sub[FEATURES + ["Direction"]].values
-
+    for _, group in data.groupby("Company"):
+        values = group[FEATURES + ["Direction"]].values
         if len(values) < LOOKBACK:
             continue
 
@@ -351,47 +332,26 @@ print("Train sequences:", len(X_train))
 print("Test sequences:", len(X_test))
 
 # ==================================================
-# LSTM MODEL
+# SIMPLE FAST LSTM (BEST FOR CPU)
 # ==================================================
-inputs = Input(shape=(LOOKBACK, X_train.shape[2]))
-
-x = LSTM(128, return_sequences=True)(inputs)
-x = BatchNormalization()(x)
-x = Dropout(0.3)(x)
-
-x = LSTM(64)(x)
-x = BatchNormalization()(x)
-x = Dropout(0.3)(x)
-
-x = Dense(32, activation="relu")(x)
-x = Dropout(0.2)(x)
-
-outputs = Dense(1, activation="sigmoid")(x)
-
-model = Model(inputs, outputs)
+model = Sequential([
+    LSTM(32, input_shape=(LOOKBACK, len(FEATURES))),
+    Dropout(0.2),
+    Dense(1, activation="sigmoid")
+])
 
 model.compile(
-    optimizer=tf.keras.optimizers.Adam(1e-3),
+    optimizer="adam",
     loss="binary_crossentropy",
     metrics=["accuracy"]
 )
 
 model.summary()
 
-# ==================================================
-# CALLBACKS
-# ==================================================
 early_stop = EarlyStopping(
     monitor="val_loss",
-    patience=7,
+    patience=4,
     restore_best_weights=True
-)
-
-reduce_lr = ReduceLROnPlateau(
-    monitor="val_loss",
-    factor=0.5,
-    patience=3,
-    verbose=1
 )
 
 # ==================================================
@@ -405,7 +365,7 @@ model.fit(
     validation_split=0.1,
     epochs=EPOCHS,
     batch_size=BATCH_SIZE,
-    callbacks=[early_stop, reduce_lr],
+    callbacks=[early_stop],
     verbose=1
 )
 
@@ -414,7 +374,7 @@ model.fit(
 # ==================================================
 print("📊 Evaluating...")
 
-y_prob = model.predict(X_test, batch_size=4096).flatten()
+y_prob = model.predict(X_test, batch_size=2048).flatten()
 y_pred = (y_prob > 0.5).astype(int)
 
 accuracy = accuracy_score(y_test, y_pred)
@@ -423,16 +383,15 @@ f1 = f1_score(y_test, y_pred)
 mcc = matthews_corrcoef(y_test, y_pred)
 
 results = pd.DataFrame([{
-    "Model": "Journal LSTM - 7Y S&P500",
-    "Companies": df["Company"].nunique(),
+    "Model": "CPU Fast LSTM - 10Y S&P500",
     "Accuracy_%": round(accuracy * 100, 2),
     "ROC_AUC": round(auc, 4),
     "F1_Score": round(f1, 4),
     "MCC": round(mcc, 4)
 }])
 
-results.to_csv("data/sp500_journal_lstm_results.csv", index=False)
-model.save("models/sp500_journal_lstm.keras")
+results.to_csv("data/sp500_cpu_fast_lstm_results.csv", index=False)
+model.save("models/sp500_cpu_fast_lstm.keras")
 
 print("\n📊 FINAL RESULTS")
 print(results)

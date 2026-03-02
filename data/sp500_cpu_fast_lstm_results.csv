@@ -1,0 +1,2 @@
+Model,Accuracy_%,ROC_AUC,F1_Score,MCC
+CPU Fast LSTM - 10Y S&P500,50.88,0.4938,0.647,-0.0108
